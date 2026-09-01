@@ -63,12 +63,13 @@ pyinstaller --onefile --console --name tuimail --collect-all textual --add-data 
 pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss:tuimail" run.py
 ```
 
-**Installing on macOS** so it runs as the `tuimail` command: download the
-`tuimail-macos-universal` binary (Apple Silicon and Intel) from the Actions
-artifacts, then put it on PATH and clear the Gatekeeper quarantine once:
+**Installing on macOS** so it runs as the `tuimail` command: download
+`tuimail-macos-universal` (Apple Silicon and Intel) from the
+[latest release](https://github.com/alpatovdanila/tui-mail/releases/latest),
+rename it, put it on PATH and clear the Gatekeeper quarantine once:
 
 ```bash
-sudo install -m 755 tuimail /usr/local/bin/tuimail && sudo xattr -d com.apple.quarantine /usr/local/bin/tuimail
+sudo install -m 755 tuimail-macos-universal /usr/local/bin/tuimail && sudo xattr -d com.apple.quarantine /usr/local/bin/tuimail
 ```
 
 After that, `tuimail` from any terminal starts the app. When the binary sits
@@ -83,10 +84,12 @@ binary — portable mode.
 pipx install git+https://github.com/alpatovdanila/tui-mail.git
 ```
 
-**All platforms at once**: push the repo to GitHub —
-[.github/workflows/build.yml](.github/workflows/build.yml) runs the acceptance
-suite, then builds and smoke-tests a Windows exe and a universal macOS binary
-(one file for Apple Silicon and Intel) as downloadable artifacts on every push.
+**Download instead of building**: every push to `main` updates the rolling
+[`latest` release](https://github.com/alpatovdanila/tui-mail/releases/latest)
+with a Windows exe and a universal macOS binary (one file for Apple Silicon
+and Intel), built and smoke-tested by
+[CI](.github/workflows/build.yml). Pushing a `v*` tag cuts a versioned
+release the same way.
 
 ## Keys
 

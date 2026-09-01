@@ -52,3 +52,29 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/tuimail*
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: assemble assets
+        run: |
+          mkdir out
+          mv art/tuimail-windows/tuimail.exe out/tuimail-windows.exe
+          mv art/tuimail-macos-universal/tuimail out/tuimail-macos-universal
+      - name: publish release
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then TAG="$GITHUB_REF_NAME"; else TAG=latest; fi
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" out/* \
+            --title "tuimail $TAG" \
+            --notes "Automated build from ${GITHUB_SHA::7}. Assets: Windows exe, universal macOS binary (Apple Silicon + Intel). macOS: \`chmod +x tuimail-macos-universal && xattr -d com.apple.quarantine tuimail-macos-universal\`"
