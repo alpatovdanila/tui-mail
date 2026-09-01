@@ -65,19 +65,27 @@ pyinstaller --onefile --console --name tuimail --collect-all textual --add-data 
 
 **Installing on macOS**: grab `tuimail-macos.dmg` from the
 [latest release](https://github.com/alpatovdanila/tui-mail/releases/latest),
-open it and double-click **Install tuimail.command** (right-click > Open the
-first time — the app is not code-signed). That puts the `tuimail` command on
-your PATH. Prefer doing it by hand? The bare `tuimail-macos-universal` binary
-(Apple Silicon and Intel) is in the same release:
+open it and **drag tuimail into Applications** — the usual two-icon window.
+The app is not code-signed, so the first launch needs a right-click > Open
+(or System Settings → Privacy & Security → Open Anyway); after that it opens
+normally. Double-clicking the app opens Terminal running tuimail.
+
+Want the `tuimail` command in your own terminal too? Either link the app's
+binary:
+
+```bash
+sudo ln -sf /Applications/tuimail.app/Contents/MacOS/tuimail-bin /usr/local/bin/tuimail
+```
+
+or install the bare `tuimail-macos-universal` binary from the same release:
 
 ```bash
 sudo install -m 755 tuimail-macos-universal /usr/local/bin/tuimail && sudo xattr -d com.apple.quarantine /usr/local/bin/tuimail
 ```
 
-After that, `tuimail` from any terminal starts the app. When the binary sits
-in a non-writable directory like `/usr/local/bin`, settings go to
-`~/.tuimail.json`; in a writable directory (USB stick), they stay next to the
-binary — portable mode.
+When the binary sits in a non-writable directory like `/usr/local/bin`,
+settings go to `~/.tuimail.json`; in a writable directory (USB stick), they
+stay next to the binary — portable mode.
 
 **Or install with Python** (any OS, no binary needed) — this also creates the
 `tuimail` command:

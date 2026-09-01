@@ -4,6 +4,15 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.2.1 — 2026-09-01
+
+### Changed
+- The macOS dmg is now a proper drag-and-drop installer: a `tuimail.app`
+  bundle (with its own icon) plus an Applications shortcut. Double-clicking
+  the installed app opens Terminal running tuimail; the launcher clears the
+  quarantine flag after the first approved run so Gatekeeper only asks once.
+- The `tuimail` CLI on macOS can simply be a symlink to the app's binary.
+
 ## 1.2.0 — 2026-09-01
 
 ### Added

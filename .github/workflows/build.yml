@@ -48,23 +48,54 @@ jobs:
       - name: smoke test (windows)
         if: runner.os == 'Windows'
         run: .\dist\tuimail.exe --check
-      - name: package dmg
+      - name: package dmg (drag-and-drop app bundle)
         if: runner.os == 'macOS'
         run: |
-          mkdir dmgroot
-          cp dist/tuimail dmgroot/tuimail
-          cat > "dmgroot/Install tuimail.command" <<'EOF'
-          #!/bin/bash
           set -e
-          cd "$(dirname "$0")"
-          echo "Installing tuimail to /usr/local/bin (your password may be asked)…"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 755 tuimail /usr/local/bin/tuimail
-          sudo xattr -d com.apple.quarantine /usr/local/bin/tuimail 2>/dev/null || true
-          echo "Done. Open a new terminal and run: tuimail"
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+
+          pip install pillow
+          python scripts/make_icon.py icon_1024.png
+          mkdir tuimail.iconset
+          for sz in 16 32 64 128 256 512; do
+            sips -z $sz $sz icon_1024.png --out tuimail.iconset/icon_${sz}x${sz}.png >/dev/null
+            sips -z $((sz*2)) $((sz*2)) icon_1024.png --out tuimail.iconset/icon_${sz}x${sz}@2x.png >/dev/null
+          done
+          iconutil -c icns tuimail.iconset -o tuimail.icns
+
+          APP=dmgroot/tuimail.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp dist/tuimail "$APP/Contents/MacOS/tuimail-bin"
+          cp tuimail.icns "$APP/Contents/Resources/tuimail.icns"
+          cat > "$APP/Contents/MacOS/launcher" <<'EOF'
+          #!/bin/bash
+          APP_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+          # once the user has approved the app, clear quarantine so the inner
+          # binary doesn't trigger a second Gatekeeper prompt in Terminal
+          xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
+          open -a Terminal "$APP_DIR/Contents/MacOS/tuimail-bin"
           EOF
-          chmod +x dmgroot/tuimail "dmgroot/Install tuimail.command"
-          printf 'tuimail — mail, comfortably, in your terminal\n\nDouble-click "Install tuimail.command" to put the tuimail command on your\nPATH (right-click > Open the first time; the app is not code-signed).\nOr copy the tuimail binary anywhere yourself.\n' > dmgroot/README.txt
+          chmod +x "$APP/Contents/MacOS/launcher" "$APP/Contents/MacOS/tuimail-bin"
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>tuimail</string>
+            <key>CFBundleDisplayName</key><string>tuimail</string>
+            <key>CFBundleIdentifier</key><string>dev.tuimail.app</string>
+            <key>CFBundleVersion</key><string>$VERSION</string>
+            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleExecutable</key><string>launcher</string>
+            <key>CFBundleIconFile</key><string>tuimail.icns</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+          </dict>
+          </plist>
+          EOF
+          plutil -lint "$APP/Contents/Info.plist"
+
+          ln -s /Applications dmgroot/Applications
           hdiutil create -volname tuimail -srcfolder dmgroot -ov -format UDZO dist/tuimail-macos.dmg
       - uses: actions/upload-artifact@v4
         with:
