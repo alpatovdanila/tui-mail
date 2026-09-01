@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: tuimail
-Version: 1.0.0
-Summary: Mail, comfortably, in your terminal
-Requires-Python: >=3.10
-Requires-Dist: textual>=1.0
