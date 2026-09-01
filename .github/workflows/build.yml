@@ -90,10 +90,28 @@ jobs:
           mv art/tuimail-windows/tuimail.exe out/tuimail-windows.exe
           mv art/tuimail-macos-universal/tuimail out/tuimail-macos-universal
           mv art/tuimail-macos-universal/tuimail-macos.dmg out/tuimail-macos.dmg
-      - name: publish release
+      - name: publish releases
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then TAG="$GITHUB_REF_NAME"; else TAG=latest; fi
-          gh release delete "$TAG" --yes --cleanup-tag || true
-          gh release create "$TAG" out/* \
-            --title "tuimail $TAG" \
-            --notes "Automated build from ${GITHUB_SHA::7}. Assets: Windows exe; macOS dmg installer and bare universal binary (Apple Silicon + Intel). macOS is unsigned: right-click > Open the installer the first time."
+          notes_for() { awk -v v="$1" 'index($0, "## " v) == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md; }
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+            NOTES="$(notes_for "$V")"
+            gh release create "$GITHUB_REF_NAME" out/* \
+              --title "tuimail $GITHUB_REF_NAME" --notes "${NOTES:-Release $GITHUB_REF_NAME}"
+            exit 0
+          fi
+
+          # rolling dev build, clearly marked so versioned releases stay the face
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest out/* --prerelease --latest=false \
+            --title 'tuimail latest (rolling dev build)' \
+            --notes "Rolling build of main (${GITHUB_SHA::7}). For stable downloads use the newest versioned release."
+
+          # first push carrying a new pyproject version -> cut the vX.Y.Z release
+          VERSION=$(grep -Po '(?<=^version = ")[^"]+' pyproject.toml)
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            NOTES="$(notes_for "$VERSION")"
+            gh release create "v$VERSION" out/* --target "$GITHUB_SHA" \
+              --title "tuimail v$VERSION" --notes "${NOTES:-Release v$VERSION}"
+          fi

@@ -86,12 +86,14 @@ binary — portable mode.
 pipx install git+https://github.com/alpatovdanila/tui-mail.git
 ```
 
-**Download instead of building**: every push to `main` updates the rolling
-[`latest` release](https://github.com/alpatovdanila/tui-mail/releases/latest)
-with a Windows exe and a universal macOS binary (one file for Apple Silicon
-and Intel), built and smoke-tested by
-[CI](.github/workflows/build.yml). Pushing a `v*` tag cuts a versioned
-release the same way.
+**Download instead of building**: grab the
+[latest versioned release](https://github.com/alpatovdanila/tui-mail/releases/latest)
+— Windows exe, macOS dmg installer, and a universal macOS binary (one file for
+Apple Silicon and Intel), built and smoke-tested by
+[CI](.github/workflows/build.yml). A new `vX.Y.Z` release (with notes from
+[CHANGELOG.md](CHANGELOG.md)) is cut automatically whenever the version in
+`pyproject.toml` bumps; a rolling `latest` prerelease tracks every push to
+`main` for the impatient.
 
 ## Keys
 
@@ -114,6 +116,10 @@ release the same way.
 python tests/acceptance.py        # full acceptance suite (headless, demo backend)
 python scripts/screenshots.py     # regenerate docs/*.svg
 ```
+
+Releasing: bump `version` in [pyproject.toml](pyproject.toml), add a matching
+section to [CHANGELOG.md](CHANGELOG.md), push to `main` — CI builds, tags
+`vX.Y.Z`, and publishes the release with those notes.
 
 More screens: [onboarding](docs/onboarding.svg) · [login](docs/login.svg) ·
 [reader](docs/reader.svg) · [compose](docs/compose.svg) · [help](docs/help.svg)
