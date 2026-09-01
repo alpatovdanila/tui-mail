@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+tuimail/__init__.py
+tuimail/__main__.py
+tuimail/app.py
+tuimail/app.tcss
+tuimail/backend.py
+tuimail.egg-info/PKG-INFO
+tuimail.egg-info/SOURCES.txt
+tuimail.egg-info/dependency_links.txt
+tuimail.egg-info/entry_points.txt
+tuimail.egg-info/requires.txt
+tuimail.egg-info/top_level.txt

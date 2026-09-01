@@ -55,8 +55,11 @@ PROVIDERS = {
 def config_path() -> Path:
     if p := os.environ.get('TUIMAIL_CONFIG'):
         return Path(p)
-    if getattr(sys, 'frozen', False):  # portable exe: settings travel next to it
-        return Path(sys.executable).parent / 'tuimail.json'
+    if getattr(sys, 'frozen', False):  # portable binary: settings travel next to it
+        here = Path(sys.executable).parent / 'tuimail.json'
+        # installed to a non-writable dir (e.g. /usr/local/bin) -> fall through to home
+        if here.exists() or os.access(here.parent, os.W_OK):
+            return here
     return Path.home() / '.tuimail.json'
 
 

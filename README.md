@@ -55,11 +55,24 @@ pyinstaller --onefile --console --name tuimail --collect-all textual --add-data 
 pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss:tuimail" run.py
 ```
 
-The result is `dist/tuimail` — run it from Terminal. An unsigned binary gets
-quarantined by Gatekeeper on download; clear it once with:
+**Installing on macOS** so it runs as the `tuimail` command: download the
+binary (arm64 for Apple Silicon, intel otherwise) from the Actions artifacts,
+then put it on PATH and clear the Gatekeeper quarantine once:
 
 ```bash
-chmod +x tuimail && xattr -d com.apple.quarantine tuimail
+sudo install -m 755 tuimail /usr/local/bin/tuimail && sudo xattr -d com.apple.quarantine /usr/local/bin/tuimail
+```
+
+After that, `tuimail` from any terminal starts the app. When the binary sits
+in a non-writable directory like `/usr/local/bin`, settings go to
+`~/.tuimail.json`; in a writable directory (USB stick), they stay next to the
+binary — portable mode.
+
+**Or install with Python** (any OS, no binary needed) — this also creates the
+`tuimail` command:
+
+```bash
+pipx install git+https://github.com/alpatovdanila/tui-mail.git
 ```
 
 **All platforms at once**: push the repo to GitHub —

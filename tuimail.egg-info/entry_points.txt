@@ -1,0 +1,2 @@
+[console_scripts]
+tuimail = tuimail.__main__:main
