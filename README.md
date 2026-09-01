@@ -64,8 +64,8 @@ pyinstaller --onefile --console --name tuimail --collect-all textual --add-data 
 ```
 
 **Installing on macOS** so it runs as the `tuimail` command: download the
-binary (arm64 for Apple Silicon, intel otherwise) from the Actions artifacts,
-then put it on PATH and clear the Gatekeeper quarantine once:
+`tuimail-macos-universal` binary (Apple Silicon and Intel) from the Actions
+artifacts, then put it on PATH and clear the Gatekeeper quarantine once:
 
 ```bash
 sudo install -m 755 tuimail /usr/local/bin/tuimail && sudo xattr -d com.apple.quarantine /usr/local/bin/tuimail
@@ -85,8 +85,8 @@ pipx install git+https://github.com/alpatovdanila/tui-mail.git
 
 **All platforms at once**: push the repo to GitHub —
 [.github/workflows/build.yml](.github/workflows/build.yml) runs the acceptance
-suite, then builds and smoke-tests Windows, macOS arm64 (Apple Silicon), and
-macOS Intel binaries as downloadable artifacts on every push.
+suite, then builds and smoke-tests a Windows exe and a universal macOS binary
+(one file for Apple Silicon and Intel) as downloadable artifacts on every push.
 
 ## Keys
 

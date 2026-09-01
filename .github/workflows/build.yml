@@ -4,6 +4,10 @@ on:
   push:
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -23,12 +27,13 @@ jobs:
           - os: windows-latest
             artifact: tuimail-windows
             sep: ';'
-          - os: macos-latest      # Apple Silicon
-            artifact: tuimail-macos-arm64
+            arch: ''
+          - os: macos-latest
+            # one universal2 binary covers Apple Silicon and Intel; GitHub has
+            # no Intel mac runners any more (macos-13 jobs queue forever)
+            artifact: tuimail-macos-universal
             sep: ':'
-          - os: macos-13          # Intel
-            artifact: tuimail-macos-intel
-            sep: ':'
+            arch: '--target-arch universal2'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +41,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: pip install textual pyinstaller
-      - run: pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss${{ matrix.sep }}tuimail" run.py
+      - run: pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss${{ matrix.sep }}tuimail" ${{ matrix.arch }} run.py
       - name: smoke test (posix)
         if: runner.os != 'Windows'
         run: ./dist/tuimail --check
