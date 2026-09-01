@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install textual
+      - run: python tests/acceptance.py
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: tuimail-windows
+            sep: ';'
+          - os: macos-latest      # Apple Silicon
+            artifact: tuimail-macos-arm64
+            sep: ':'
+          - os: macos-13          # Intel
+            artifact: tuimail-macos-intel
+            sep: ':'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install textual pyinstaller
+      - run: pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss${{ matrix.sep }}tuimail" run.py
+      - name: smoke test (posix)
+        if: runner.os != 'Windows'
+        run: ./dist/tuimail --check
+      - name: smoke test (windows)
+        if: runner.os == 'Windows'
+        run: .\dist\tuimail.exe --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/tuimail*

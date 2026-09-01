@@ -1,0 +1,533 @@
+"""Mail engine: config, parsing helpers, Demo and IMAP backends. Stdlib only.
+
+Carries fixes for review-confirmed bugs of the old prototype:
+- reply address is taken from the *raw/structured* From header, never from the
+  RFC2047-decoded string (decoded "Doe, John" breaks strict parseaddr);
+- FETCH response parsing does not assume item order — UID/FLAGS may legally
+  arrive *after* the header literal, as trailing bytes fragments;
+- fetching an expunged UID raises MailGone (clean message) instead of a blank
+  StopIteration;
+- In-Reply-To values are unfolded before being set as header values.
+"""
+import email
+import email.header
+import email.policy
+import email.utils
+import imaplib
+import json
+import os
+import re
+import smtplib
+import sys
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from pathlib import Path
+
+
+class MailGone(Exception):
+    """The message no longer exists on the server."""
+
+
+# --- config ------------------------------------------------------------------
+PROVIDERS = {
+    'Gmail': {
+        'imap': 'imap.gmail.com', 'smtp': 'smtp.gmail.com:465',
+        'hint': 'Needs an app password: myaccount.google.com/apppasswords',
+    },
+    'Outlook / Office 365': {
+        'imap': 'outlook.office365.com', 'smtp': 'smtp-mail.outlook.com:587',
+        'hint': 'Needs an app password (account.microsoft.com → Security)',
+    },
+    'Yandex': {
+        'imap': 'imap.yandex.com', 'smtp': 'smtp.yandex.com:465',
+        'hint': 'Enable IMAP + app password: id.yandex.com → Security',
+    },
+    'iCloud': {
+        'imap': 'imap.mail.me.com', 'smtp': 'smtp.mail.me.com:587',
+        'hint': 'Needs an app-specific password: appleid.apple.com',
+    },
+    'Custom': {'imap': '', 'smtp': '', 'hint': 'Any IMAP/SSL + SMTP server; host or host:port'},
+}
+
+
+def config_path() -> Path:
+    if p := os.environ.get('TUIMAIL_CONFIG'):
+        return Path(p)
+    if getattr(sys, 'frozen', False):  # portable exe: settings travel next to it
+        return Path(sys.executable).parent / 'tuimail.json'
+    return Path.home() / '.tuimail.json'
+
+
+def load_config() -> dict:
+    try:
+        cfg = json.loads(config_path().read_text('utf-8'))
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(cfg: dict) -> bool:
+    try:
+        p = config_path()
+        p.write_text(json.dumps(cfg, indent=2), 'utf-8')
+        if os.name == 'posix':
+            p.chmod(0o600)
+        return True
+    except OSError:
+        return False
+
+
+def downloads_dir() -> Path:
+    return Path(os.environ.get('TUIMAIL_DOWNLOADS', str(Path.home() / 'Downloads')))
+
+
+# --- parsing helpers ---------------------------------------------------------
+@dataclass
+class Summary:
+    uid: str
+    sender: str
+    subject: str
+    date: datetime | None = None
+    unread: bool = False
+    flagged: bool = False
+
+
+def dec(s) -> str:
+    """Decode an RFC2047 header for *display*, collapsing folds."""
+    if not s:
+        return ''
+    s = str(s)
+    try:
+        return ' '.join(str(email.header.make_header(email.header.decode_header(s))).split())
+    except Exception:
+        return s
+
+
+def parse_date(d) -> datetime | None:
+    try:
+        dt = email.utils.parsedate_to_datetime(d)
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+    except Exception:
+        return None
+
+
+def nice_date(dt: datetime | None) -> str:
+    if not dt:
+        return ''
+    local = dt.astimezone()
+    now = datetime.now()
+    if local.date() == now.date():
+        return local.strftime('%H:%M')
+    if local.year == now.year:
+        return local.strftime('%d %b')
+    return local.strftime('%Y-%m-%d')
+
+
+def nice_from(raw) -> str:
+    """Display name from a raw From header: parse first, decode after."""
+    name, addr = email.utils.parseaddr(str(raw or ''))
+    return dec(name) or addr or dec(raw)
+
+
+def body_of(msg) -> str:
+    part = msg.get_body(preferencelist=('plain', 'html'))
+    if part is None:
+        return '(no readable text part)'
+    try:
+        text = part.get_content()
+    except Exception:
+        text = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace')
+    if part.get_content_type() == 'text/html':
+        text = re.sub(r'(?is)<(script|style)\b.*?</\1>', '', text)
+        text = re.sub(r'(?i)<br\s*/?>|</p>|</div>', '\n', text)
+        import html as _html
+        text = _html.unescape(re.sub(r'<[^>]+>', '', text))  # ponytail: naive HTML strip; html.parser if it matters
+        text = re.sub(r'[ \t]+', ' ', text)
+        text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    return text
+
+
+URL_RE = re.compile(r'https?://[^\s<>"\')\]]+')
+
+
+def extract_links(msg) -> list[str]:
+    texts = []
+    for part in msg.walk():
+        if part.get_content_type() in ('text/plain', 'text/html'):
+            try:
+                texts.append(part.get_content())
+            except Exception:
+                pass
+    seen: dict[str, None] = {}
+    for t in texts:
+        for u in URL_RE.findall(t):
+            seen.setdefault(u.rstrip('.,;:!?'))
+    return list(seen)
+
+
+def attachments_of(msg) -> list[tuple[str, bytes]]:
+    out = []
+    for part in msg.iter_attachments():
+        name = os.path.basename(part.get_filename() or 'attachment.bin')
+        name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', name) or 'attachment.bin'
+        try:
+            data = part.get_payload(decode=True) or b''
+        except Exception:
+            data = b''
+        out.append((name, data))
+    return out
+
+
+def reply_seed(msg) -> dict:
+    """Prefill for replying to a policy.default-parsed message."""
+    frm = msg.get('From')
+    addr = ''
+    try:
+        if frm is not None and frm.addresses:
+            addr = frm.addresses[0].addr_spec
+    except Exception:
+        pass
+    if not addr:  # malformed header: parse the raw-ish string, never the decoded one
+        addr = email.utils.parseaddr(str(frm or ''))[1]
+    subject = str(msg.get('Subject') or '')
+    if not subject.lower().startswith('re:'):
+        subject = 'Re: ' + subject
+    quoted = '\n'.join('> ' + ln for ln in body_of(msg).splitlines())
+    body = f'\n\nOn {msg.get("Date", "an earlier date")}, {addr or "they"} wrote:\n{quoted}\n'
+    mid = str(msg.get('Message-ID') or '')
+    return {'to': addr, 'subject': subject, 'body': body,
+            'in_reply_to': ' '.join(mid.split())}
+
+
+def build_message(sender, to, subject, body, in_reply_to=None) -> EmailMessage:
+    m = EmailMessage()
+    m['From'], m['To'], m['Subject'] = sender, to, subject
+    m['Date'] = email.utils.formatdate(localtime=True)
+    m['Message-ID'] = email.utils.make_msgid()
+    if in_reply_to:
+        m['In-Reply-To'] = m['References'] = ' '.join(in_reply_to.split())
+    m.set_content(body)
+    return m
+
+
+def parse_fetch_headers(resp) -> list[Summary]:
+    """Parse a batch UID FETCH (UID FLAGS BODY.PEEK[HEADER.FIELDS ...]) response.
+
+    RFC 3501 fixes no item order: UID/FLAGS may trail the header literal as a
+    bare bytes fragment after the tuple, so metadata is gathered from both.
+    """
+    out = []
+    i = 0
+    while i < len(resp):
+        part = resp[i]
+        i += 1
+        if not isinstance(part, tuple):
+            continue
+        meta = part[0] or b''
+        while i < len(resp) and isinstance(resp[i], bytes):
+            meta += b' ' + resp[i]
+            i += 1
+        um = re.search(rb'UID (\d+)', meta)
+        if not um:
+            continue
+        fm = re.search(rb'FLAGS \(([^)]*)\)', meta)
+        flags = fm.group(1) if fm else b''
+        h = email.message_from_bytes(part[1] or b'')
+        out.append(Summary(
+            uid=um.group(1).decode(),
+            sender=nice_from(h['From']),
+            subject=dec(h['Subject']) or '(no subject)',
+            date=parse_date(h['Date']),
+            unread=b'\\Seen' not in flags,
+            flagged=b'\\Flagged' in flags,
+        ))
+    out.sort(key=lambda s: s.date or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return out
+
+
+def smtp_send(smtp_host, address, password, msg) -> None:
+    host, _, port = smtp_host.partition(':')
+    port = int(port or 465)
+    cls = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
+    with cls(host, port, timeout=20) as s:
+        if port != 465:
+            s.starttls()
+        s.login(address, password)
+        s.send_message(msg)
+
+
+# --- IMAP backend ------------------------------------------------------------
+class ImapBackend:
+    def __init__(self, address, password, imap_host, smtp_host):
+        self.address = address
+        self._pw = password
+        self._imap_host, self._smtp_host = imap_host, smtp_host
+        self._lock = threading.Lock()
+        self._conn = None
+        self._selected = None
+        with self._lock:
+            self._connect()  # raises on bad host/credentials
+
+    def _connect(self):
+        host, _, port = self._imap_host.partition(':')
+        self._conn = imaplib.IMAP4_SSL(host, int(port or 993), timeout=15)
+        self._conn.login(self.address, self._pw)
+        self._selected = None
+
+    def _retry(self, fn):
+        with self._lock:
+            try:
+                return fn()
+            except (imaplib.IMAP4.abort, OSError):
+                self._connect()
+                return fn()
+
+    def _select(self, folder):
+        if self._selected != folder:
+            self._selected = None  # a failed SELECT leaves the connection unselected
+            typ, _ = self._conn.select(f'"{folder}"')
+            if typ != 'OK':
+                raise RuntimeError(f'cannot open folder {folder}')
+            self._selected = folder
+
+    def folders(self):
+        def go():
+            typ, data = self._conn.list()
+            names = []
+            for line in data or []:
+                if not isinstance(line, bytes) or re.search(rb'(?i)\\Noselect', line):
+                    continue
+                m = re.match(rb'\([^)]*\)\s+(?:"[^"]*"|NIL)\s+(.+)$', line)
+                if not m:
+                    continue
+                name = m.group(1).strip()
+                if name.startswith(b'"') and name.endswith(b'"'):
+                    name = name[1:-1]
+                names.append(name.decode('ascii', 'replace'))  # ponytail: modified-UTF7 folder names shown raw
+            names.sort(key=lambda n: (n.upper() != 'INBOX', n.upper()))
+            out = []
+            for name in names[:30]:
+                unseen = 0
+                try:
+                    typ, sdata = self._conn.status(f'"{name}"', '(UNSEEN)')
+                    sm = re.search(rb'UNSEEN (\d+)', sdata[0] if sdata and isinstance(sdata[0], bytes) else b'')
+                    if sm:
+                        unseen = int(sm.group(1))
+                except imaplib.IMAP4.error:
+                    pass
+                out.append((name, unseen))
+            return out
+        return self._retry(go)
+
+    def list_messages(self, folder, limit=100):
+        def go():
+            self._select(folder)
+            typ, d = self._conn.uid('search', None, 'ALL')
+            uids = (d[0] or b'').split()[-limit:]
+            if not uids:
+                return []
+            typ, resp = self._conn.uid(
+                'fetch', b','.join(uids),
+                '(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])')
+            return parse_fetch_headers(resp or [])
+        return self._retry(go)
+
+    def fetch(self, folder, uid):
+        def go():
+            self._select(folder)
+            typ, d = self._conn.uid('fetch', uid, '(BODY.PEEK[])')  # PEEK: fetching for preview must not mark \Seen
+            raw = next((t[1] for t in d if isinstance(t, tuple)), None)
+            if raw is None:
+                raise MailGone('message no longer exists on the server')
+            return email.message_from_bytes(raw, policy=email.policy.default)
+        return self._retry(go)
+
+    def mark(self, folder, uid, read=True):
+        def go():
+            self._select(folder)
+            self._conn.uid('store', uid, '+FLAGS' if read else '-FLAGS', '\\Seen')
+        self._retry(go)
+
+    def flag(self, folder, uid, flagged=True):
+        def go():
+            self._select(folder)
+            self._conn.uid('store', uid, '+FLAGS' if flagged else '-FLAGS', '\\Flagged')
+        self._retry(go)
+
+    def delete(self, folder, uid):
+        def go():
+            self._select(folder)
+            self._conn.uid('store', uid, '+FLAGS', '\\Deleted')
+            try:
+                self._conn.uid('expunge', uid)  # UIDPLUS: expunge only this message
+            except imaplib.IMAP4.error:
+                self._conn.expunge()  # ponytail: non-UIDPLUS servers expunge every \Deleted
+        self._retry(go)
+
+    def search(self, folder, query):
+        """Server-side full-text search; None means 'filter locally'."""
+        if not query.isascii():
+            return None
+        def go():
+            self._select(folder)
+            q = query.replace('\\', '').replace('"', '')
+            typ, d = self._conn.uid('search', None, 'TEXT', f'"{q}"')
+            return {u.decode() for u in (d[0] or b'').split()}
+        try:
+            return self._retry(go)
+        except imaplib.IMAP4.error:
+            return None
+
+    def send(self, msg):
+        # ponytail: no APPEND to Sent — Gmail/most providers save a copy themselves
+        smtp_send(self._smtp_host, self.address, self._pw, msg)
+
+    def close(self):
+        try:
+            with self._lock:
+                self._conn.logout()
+        except Exception:
+            pass
+
+
+# --- demo backend ------------------------------------------------------------
+def _demo_msg(sender, subject, body, *, html=False, hours=0, days=0, attach=None):
+    m = EmailMessage()
+    m['From'], m['To'], m['Subject'] = sender, 'you@tuimail.demo', subject
+    m['Date'] = email.utils.format_datetime(
+        datetime.now().astimezone() - timedelta(days=days, hours=hours))
+    m['Message-ID'] = email.utils.make_msgid(domain='tuimail.demo')
+    m.set_content(body, subtype='html' if html else 'plain')
+    if attach:
+        m.add_attachment(attach[1], maintype='text', subtype='plain', filename=attach[0])
+    return m
+
+
+def _demo_data():
+    dt = email.utils.format_datetime(datetime.now().astimezone() - timedelta(hours=5))
+    corp = email.message_from_bytes(
+        (f'From: =?utf-8?q?Doe=2C_John?= <john.doe@corp.example>\r\n'
+         f'To: you@tuimail.demo\r\nSubject: Q3 planning notes\r\nDate: {dt}\r\n'
+         f'Message-ID: <q3-planning@corp.example>\r\n'
+         f'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+         f'Hi,\r\n\r\nCould you look over the Q3 notes before the Friday sync?\r\n'
+         f'The board deck depends on your numbers.\r\n\r\n-- John\r\n').encode(),
+        policy=email.policy.default)
+    inbox = [
+        dict(msg=_demo_msg('Textual Weekly <news@textualize.io>', 'Beautiful terminals ship this week',
+                           'The latest on terminal UIs:\n\n'
+                           '- Docs: https://textual.textualize.io\n'
+                           '- Source: https://github.com/Textualize/textual\n\n'
+                           'Build something lovely.\n', hours=1), unread=True, flagged=False),
+        dict(msg=corp, unread=True, flagged=False),
+        dict(msg=_demo_msg('Mira <mira@example.com>', 'Flight itinerary + packing list',
+                           'Landing Friday 18:40, gate B12. Packing list attached so we '
+                           'do not forget the chargers again.\n\nx M',
+                           hours=9, attach=('packing-list.txt', b'passport\nchargers\nadapter\nsunscreen\n')),
+             unread=False, flagged=True),
+        dict(msg=_demo_msg('GitHub <noreply@github.com>', '[tuimail] Your build passed',
+                           '<html><body><p>Build <b>#42</b> passed on <i>main</i>.</p>'
+                           '<p><a href="https://github.com">View run</a></p>'
+                           '<style>p{color:red}</style></body></html>',
+                           html=True, hours=14), unread=True, flagged=False),
+        dict(msg=_demo_msg('Vera Marlow <vera@studio.example>', 'Logo drafts, round two',
+                           'Three directions this time. The wordmark one is my favourite — '
+                           'it survives a 16x16 favicon.\n\nVera', days=1), unread=False, flagged=False),
+        dict(msg=_demo_msg('Library <notices@citylib.example>', 'Your reservation is ready',
+                           'The Pragmatic Programmer is waiting at the front desk until Thursday.',
+                           days=2), unread=False, flagged=False),
+        dict(msg=_demo_msg('Sam Ortiz <sam@example.com>', 'Re: Saturday ride',
+                           '> 60km, coffee halfway?\n\nDeal. 8am at the bridge.', days=3),
+             unread=False, flagged=False),
+        dict(msg=_demo_msg('statements@bank.example', 'August statement available',
+                           'Your August statement is ready in the app.', days=6),
+             unread=False, flagged=False),
+    ]
+    sent = [
+        dict(msg=_demo_msg('you@tuimail.demo', 'Re: Logo drafts, round two',
+                           'Wordmark it is. Invoice when ready!', days=1), unread=False, flagged=False),
+        dict(msg=_demo_msg('you@tuimail.demo', 'Minutes from the retro',
+                           'Attached in the doc. Main theme: fewer meetings.', days=4),
+             unread=False, flagged=False),
+    ]
+    archive = [
+        dict(msg=_demo_msg('Old Friend <ana@example.com>', 'Photos from the trip',
+                           'Finally sorted them: 400 photos, 12 good ones. Classic.', days=40),
+             unread=False, flagged=False),
+    ]
+    data = {'INBOX': inbox, 'Sent': sent, 'Archive': archive}
+    for folder, items in data.items():
+        for n, it in enumerate(items):
+            it['uid'] = f'{folder[:2].lower()}{n + 1}'
+    return data
+
+
+def _nice_from_msg(msg):
+    f = msg.get('From')
+    try:
+        if f is not None and f.addresses:
+            a = f.addresses[0]
+            return a.display_name or a.addr_spec
+    except Exception:
+        pass
+    return nice_from(str(f or ''))
+
+
+class DemoBackend:
+    address = 'you@tuimail.demo'
+
+    def __init__(self):
+        self._data = _demo_data()
+        self.outbox = []  # sent EmailMessage objects, for tests
+
+    def _find(self, folder, uid):
+        for it in self._data.get(folder, []):
+            if it['uid'] == uid:
+                return it
+        raise MailGone('message no longer exists')
+
+    def folders(self):
+        return [(name, sum(1 for it in items if it['unread']))
+                for name, items in self._data.items()]
+
+    def list_messages(self, folder, limit=100):
+        out = [Summary(uid=it['uid'], sender=_nice_from_msg(it['msg']),
+                       subject=str(it['msg'].get('Subject') or '(no subject)'),
+                       date=parse_date(it['msg'].get('Date')),
+                       unread=it['unread'], flagged=it['flagged'])
+               for it in self._data.get(folder, [])]
+        out.sort(key=lambda s: s.date or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return out
+
+    def fetch(self, folder, uid):
+        return self._find(folder, uid)['msg']
+
+    def mark(self, folder, uid, read=True):
+        self._find(folder, uid)['unread'] = not read
+
+    def flag(self, folder, uid, flagged=True):
+        self._find(folder, uid)['flagged'] = flagged
+
+    def delete(self, folder, uid):
+        self._data[folder] = [it for it in self._data.get(folder, []) if it['uid'] != uid]
+
+    def search(self, folder, query):
+        q = query.lower()
+        hits = set()
+        for it in self._data.get(folder, []):
+            hay = ' '.join([str(it['msg'].get('From') or ''),
+                            str(it['msg'].get('Subject') or ''),
+                            body_of(it['msg'])]).lower()
+            if q in hay:
+                hits.add(it['uid'])
+        return hits
+
+    def send(self, msg):
+        self.outbox.append(msg)
+        self._data.setdefault('Sent', []).insert(
+            0, dict(uid=f'sent-out{len(self.outbox)}', msg=msg, unread=False, flagged=False))
+
+    def close(self):
+        pass
