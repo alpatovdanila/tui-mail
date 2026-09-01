@@ -48,6 +48,24 @@ jobs:
       - name: smoke test (windows)
         if: runner.os == 'Windows'
         run: .\dist\tuimail.exe --check
+      - name: package dmg
+        if: runner.os == 'macOS'
+        run: |
+          mkdir dmgroot
+          cp dist/tuimail dmgroot/tuimail
+          cat > "dmgroot/Install tuimail.command" <<'EOF'
+          #!/bin/bash
+          set -e
+          cd "$(dirname "$0")"
+          echo "Installing tuimail to /usr/local/bin (your password may be asked)…"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 755 tuimail /usr/local/bin/tuimail
+          sudo xattr -d com.apple.quarantine /usr/local/bin/tuimail 2>/dev/null || true
+          echo "Done. Open a new terminal and run: tuimail"
+          EOF
+          chmod +x dmgroot/tuimail "dmgroot/Install tuimail.command"
+          printf 'tuimail — mail, comfortably, in your terminal\n\nDouble-click "Install tuimail.command" to put the tuimail command on your\nPATH (right-click > Open the first time; the app is not code-signed).\nOr copy the tuimail binary anywhere yourself.\n' > dmgroot/README.txt
+          hdiutil create -volname tuimail -srcfolder dmgroot -ov -format UDZO dist/tuimail-macos.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -71,10 +89,11 @@ jobs:
           mkdir out
           mv art/tuimail-windows/tuimail.exe out/tuimail-windows.exe
           mv art/tuimail-macos-universal/tuimail out/tuimail-macos-universal
+          mv art/tuimail-macos-universal/tuimail-macos.dmg out/tuimail-macos.dmg
       - name: publish release
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then TAG="$GITHUB_REF_NAME"; else TAG=latest; fi
           gh release delete "$TAG" --yes --cleanup-tag || true
           gh release create "$TAG" out/* \
             --title "tuimail $TAG" \
-            --notes "Automated build from ${GITHUB_SHA::7}. Assets: Windows exe, universal macOS binary (Apple Silicon + Intel). macOS: \`chmod +x tuimail-macos-universal && xattr -d com.apple.quarantine tuimail-macos-universal\`"
+            --notes "Automated build from ${GITHUB_SHA::7}. Assets: Windows exe; macOS dmg installer and bare universal binary (Apple Silicon + Intel). macOS is unsigned: right-click > Open the installer the first time."

@@ -63,10 +63,12 @@ pyinstaller --onefile --console --name tuimail --collect-all textual --add-data 
 pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss:tuimail" run.py
 ```
 
-**Installing on macOS** so it runs as the `tuimail` command: download
-`tuimail-macos-universal` (Apple Silicon and Intel) from the
+**Installing on macOS**: grab `tuimail-macos.dmg` from the
 [latest release](https://github.com/alpatovdanila/tui-mail/releases/latest),
-rename it, put it on PATH and clear the Gatekeeper quarantine once:
+open it and double-click **Install tuimail.command** (right-click > Open the
+first time — the app is not code-signed). That puts the `tuimail` command on
+your PATH. Prefer doing it by hand? The bare `tuimail-macos-universal` binary
+(Apple Silicon and Intel) is in the same release:
 
 ```bash
 sudo install -m 755 tuimail-macos-universal /usr/local/bin/tuimail && sudo xattr -d com.apple.quarantine /usr/local/bin/tuimail
