@@ -63,12 +63,30 @@ def config_path() -> Path:
     return Path.home() / '.tuimail.json'
 
 
+DEFAULT_COLORS = ['#7aa2f7', '#9ece6a', '#e0af68', '#f7768e',
+                  '#bb9af7', '#7dcfff', '#ff9e64', '#73daca']
+
+
+def next_color(cfg) -> str:
+    used = {a.get('color') for a in cfg.get('accounts', [])}
+    return next((c for c in DEFAULT_COLORS if c not in used), DEFAULT_COLORS[0])
+
+
 def load_config() -> dict:
     try:
         cfg = json.loads(config_path().read_text('utf-8'))
-        return cfg if isinstance(cfg, dict) else {}
+        if not isinstance(cfg, dict):
+            return {}
     except (OSError, ValueError):
         return {}
+    if 'accounts' not in cfg and cfg.get('address'):  # migrate pre-multi-account config
+        acct = {'name': cfg['address'].split('@')[0], 'address': cfg['address'],
+                'imap_host': cfg.get('imap_host', ''), 'smtp_host': cfg.get('smtp_host', ''),
+                'color': DEFAULT_COLORS[0]}
+        if cfg.get('password'):
+            acct['password'] = cfg['password']
+        cfg = {'accounts': [acct]}
+    return cfg
 
 
 def save_config(cfg: dict) -> bool:
@@ -95,6 +113,7 @@ class Summary:
     date: datetime | None = None
     unread: bool = False
     flagged: bool = False
+    account: str = ''  # set by Session when listing
 
 
 def dec(s) -> str:
@@ -395,10 +414,136 @@ class ImapBackend:
             pass
 
 
+# --- multi-account session ----------------------------------------------------
+@dataclass
+class Account:
+    name: str
+    color: str
+    backend: object  # ImapBackend | DemoBackend
+
+
+class Session:
+    """One signed-in session over any number of account backends.
+
+    `scope` is an account name to address one account, or None for the merged
+    all-accounts view.
+    """
+
+    def __init__(self, accounts):
+        self.accounts = list(accounts)
+        seen = set()  # names are the routing key for every operation — force unique
+        for a in self.accounts:
+            base, n = a.name, 2
+            while a.name in seen:
+                a.name = f'{base}{n}'
+                n += 1
+            seen.add(a.name)
+
+    def account(self, name) -> Account:
+        return next(a for a in self.accounts if a.name == name)
+
+    def color(self, name) -> str:
+        try:
+            return self.account(name).color
+        except StopIteration:
+            return 'white'
+
+    def address(self, name) -> str:
+        return self.account(name).backend.address
+
+    def scoped(self, scope):
+        return [a for a in self.accounts if scope in (None, a.name)]
+
+    def folders(self, scope=None):
+        accts = self.scoped(scope)
+        order, merged, last_err = [], {}, None
+        for a in accts:
+            try:
+                account_folders = a.backend.folders()
+            except Exception as exc:
+                if len(accts) == 1:
+                    raise
+                last_err = exc  # merged view: one dead account must not brick the rest
+                continue
+            for name, unread in account_folders:
+                if name not in merged:
+                    order.append(name)
+                    merged[name] = 0
+                merged[name] += unread
+        if not merged and last_err is not None:
+            raise last_err  # every account failed — that's an outage, not an empty list
+        return [(n, merged[n]) for n in order]
+
+    def list_messages(self, folder, scope=None):
+        accts = self.scoped(scope)
+        out, ok, last_err = [], 0, None
+        for a in accts:
+            try:
+                msgs = a.backend.list_messages(folder)
+            except Exception as exc:
+                if len(accts) == 1:
+                    raise
+                last_err = exc  # merged view: an account without this folder is skipped
+                continue
+            ok += 1
+            for s in msgs:
+                s.account = a.name
+            out.extend(msgs)
+        if not ok and last_err is not None:
+            raise last_err  # every account failed — surface it, don't fake an empty folder
+        out.sort(key=lambda s: s.date or datetime.min.replace(tzinfo=timezone.utc),
+                 reverse=True)
+        return out
+
+    def fetch(self, account, folder, uid):
+        return self.account(account).backend.fetch(folder, uid)
+
+    def mark(self, account, folder, uid, read=True):
+        self.account(account).backend.mark(folder, uid, read=read)
+
+    def flag(self, account, folder, uid, flagged=True):
+        self.account(account).backend.flag(folder, uid, flagged=flagged)
+
+    def delete(self, account, folder, uid):
+        self.account(account).backend.delete(folder, uid)
+
+    def search(self, folder, query, scope=None):
+        """-> ({(account, uid)}, [account names that need a local fallback])"""
+        hits, fallback = set(), []
+        for a in self.scoped(scope):
+            try:
+                h = a.backend.search(folder, query)
+            except Exception:
+                h = None
+            if h is None:
+                fallback.append(a.name)
+            else:
+                hits |= {(a.name, u) for u in h}
+        return hits, fallback
+
+    def send(self, account, msg):
+        self.account(account).backend.send(msg)
+
+    def close(self):
+        for a in self.accounts:
+            try:
+                a.backend.close()
+            except Exception:
+                pass
+
+
+def demo_session() -> Session:
+    return Session([
+        Account('personal', DEFAULT_COLORS[0], DemoBackend('you@tuimail.demo', 'home')),
+        Account('work', DEFAULT_COLORS[1], DemoBackend('work@tuimail.demo', 'work')),
+    ])
+
+
 # --- demo backend ------------------------------------------------------------
-def _demo_msg(sender, subject, body, *, html=False, hours=0, days=0, attach=None):
+def _demo_msg(sender, subject, body, *, to='you@tuimail.demo', html=False,
+              hours=0, days=0, attach=None):
     m = EmailMessage()
-    m['From'], m['To'], m['Subject'] = sender, 'you@tuimail.demo', subject
+    m['From'], m['To'], m['Subject'] = sender, to, subject
     m['Date'] = email.utils.format_datetime(
         datetime.now().astimezone() - timedelta(days=days, hours=hours))
     m['Message-ID'] = email.utils.make_msgid(domain='tuimail.demo')
@@ -408,11 +553,33 @@ def _demo_msg(sender, subject, body, *, html=False, hours=0, days=0, attach=None
     return m
 
 
-def _demo_data():
+def _demo_data(flavor='home', address='you@tuimail.demo'):
+    if flavor == 'work':
+        inbox = [
+            dict(msg=_demo_msg('Rita Chen <rita@corp.example>', 'Standup notes + action items',
+                               'Deploy freeze starts Thursday. Your two items:\n'
+                               '- review the retry PR\n- rotate the staging certs\n',
+                               to=address, hours=2), unread=True, flagged=False),
+            dict(msg=_demo_msg('CI <ci@corp.example>', 'staging deploy #142 green',
+                               'All 214 checks passed. https://ci.corp.example/142',
+                               to=address, hours=7), unread=False, flagged=False),
+            dict(msg=_demo_msg('Accounts <billing@corp.example>', 'Expense report approved',
+                               'Your September expense report was approved.',
+                               to=address, days=1), unread=False, flagged=False),
+        ]
+        sent = [dict(msg=_demo_msg(address, 'Re: Standup notes + action items',
+                                   'On it — PR review today.', to='rita@corp.example',
+                                   hours=1), unread=False, flagged=False)]
+        data = {'INBOX': inbox, 'Sent': sent}
+        for folder, items in data.items():
+            for n, it in enumerate(items):
+                it['uid'] = f'{folder[:2].lower()}{n + 1}'
+        return data
+
     dt = email.utils.format_datetime(datetime.now().astimezone() - timedelta(hours=5))
     corp = email.message_from_bytes(
         (f'From: =?utf-8?q?Doe=2C_John?= <john.doe@corp.example>\r\n'
-         f'To: you@tuimail.demo\r\nSubject: Q3 planning notes\r\nDate: {dt}\r\n'
+         f'To: {address}\r\nSubject: Q3 planning notes\r\nDate: {dt}\r\n'
          f'Message-ID: <q3-planning@corp.example>\r\n'
          f'Content-Type: text/plain; charset=utf-8\r\n\r\n'
          f'Hi,\r\n\r\nCould you look over the Q3 notes before the Friday sync?\r\n'
@@ -479,10 +646,9 @@ def _nice_from_msg(msg):
 
 
 class DemoBackend:
-    address = 'you@tuimail.demo'
-
-    def __init__(self):
-        self._data = _demo_data()
+    def __init__(self, address='you@tuimail.demo', flavor='home'):
+        self.address = address
+        self._data = _demo_data(flavor, address)
         self.outbox = []  # sent EmailMessage objects, for tests
 
     def _find(self, folder, uid):

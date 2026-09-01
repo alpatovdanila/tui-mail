@@ -10,8 +10,8 @@ from textual import work
 from textual.app import App
 from textual.binding import Binding
 from textual.command import Hit, Provider
-from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (Button, Checkbox, DataTable, Footer, Header,
                              Input, Label, ListItem, ListView, OptionList,
@@ -29,6 +29,7 @@ WELCOME = (
     'A keyboard-first email client that lives in your terminal.\n\n'
     '  • reads over IMAP, sends over SMTP — Gmail, Outlook,\n'
     '    Yandex, iCloud or any custom server\n'
+    '  • multiple accounts, each with its own color\n'
     '  • your credentials never leave this machine\n'
     '  • press ? anywhere for the keyboard reference\n'
 )
@@ -38,7 +39,7 @@ HELP_ROWS = [
     ('j / k / ↑ ↓', 'move through messages'),
     ('g / G', 'first / last message'),
     ('Enter', 'open message'),
-    ('Tab', 'cycle panes'),
+    ('Tab', 'cycle panes (accounts · folders · list)'),
     ('c / r', 'compose / reply'),
     ('u / s', 'toggle unread / star'),
     ('d', 'delete (asks first)'),
@@ -52,7 +53,7 @@ HELP_ROWS = [
     ('q / Esc', 'back'),
     ('', ''),
     ('Anywhere', ''),
-    ('Ctrl+P', 'command palette'),
+    ('Ctrl+P', 'palette — switch account, folder, theme'),
     ('Ctrl+L', 'logout'),
     ('?', 'this help'),
     ('q', 'quit (from the mailbox)'),
@@ -69,6 +70,13 @@ def ui_callback(fn):
         except NoMatches:
             pass
     return inner
+
+
+def account_label(name, color, address=''):
+    t = Text.assemble(('● ', color), name)
+    if address:
+        t.append(f'  <{address}>', 'dim')
+    return t
 
 
 # --- small modals -------------------------------------------------------------
@@ -140,7 +148,7 @@ class LinksScreen(ModalScreen):
         self.dismiss()
 
 
-# --- onboarding / account / login --------------------------------------------
+# --- onboarding / accounts / login --------------------------------------------
 class OnboardingScreen(Screen):
     def compose(self):
         with Vertical(classes='card'):
@@ -153,20 +161,36 @@ class OnboardingScreen(Screen):
 
     def on_button_pressed(self, event):
         if event.button.id == 'setup':
-            self.app.switch_screen(AccountScreen())
+            self.app.switch_screen(AccountFormScreen(None))
         else:
-            self.app.backend = be.DemoBackend()
+            self.app.session = be.demo_session()
             self.app.switch_screen(MainScreen())
 
 
-class AccountScreen(Screen):
+class AccountFormScreen(Screen):
+    """Add (index=None) or edit (index=i) one account."""
+
+    def __init__(self, index):
+        super().__init__()
+        self.index = index
+
     def compose(self):
-        with Vertical(classes='card'):
-            yield Label('Account setup', classes='card-title')
+        cfg = be.load_config()
+        with VerticalScroll(classes='card form-card'):
+            yield Label('Edit account' if self.index is not None else 'Add account',
+                        classes='card-title')
+            yield Input(placeholder='Account name (e.g. personal, work)', id='name')
             yield Select([(n, n) for n in be.PROVIDERS], prompt='Choose a provider', id='provider')
             yield Input(placeholder='Email address', id='address')
             yield Input(placeholder='IMAP host (host or host:port, SSL)', id='imap')
             yield Input(placeholder='SMTP host (host or host:port)', id='smtp')
+            yield Select([(Text.assemble(('● ', c), c), c) for c in be.DEFAULT_COLORS],
+                         value=be.next_color(cfg), allow_blank=False, id='color')
+            yield Input(placeholder='Password (blank = keep saved / ask at sign-in; stored plain if filled)',
+                        password=True, id='password')
+            if (self.index is not None and self.index < len(cfg.get('accounts', []))
+                    and cfg['accounts'][self.index].get('password')):
+                yield Checkbox('Forget the saved password', id='forget')
             yield Static('Pick a provider to fill the servers in, or type your own.',
                          id='provider-hint', classes='hint')
             with Horizontal(classes='buttons'):
@@ -174,13 +198,20 @@ class AccountScreen(Screen):
                 yield Button('Back', id='back')
 
     def on_mount(self):
-        cfg = be.load_config()
-        for fid, key in (('address', 'address'), ('imap', 'imap_host'), ('smtp', 'smtp_host')):
-            self.query_one(f'#{fid}', Input).value = cfg.get(key, '')
-        self.query_one('#address', Input).focus()
+        if self.index is not None:
+            accts = be.load_config().get('accounts', [])
+            if 0 <= self.index < len(accts):
+                a = accts[self.index]
+                self.query_one('#name', Input).value = a.get('name', '')
+                self.query_one('#address', Input).value = a.get('address', '')
+                self.query_one('#imap', Input).value = a.get('imap_host', '')
+                self.query_one('#smtp', Input).value = a.get('smtp_host', '')
+                if a.get('color') in be.DEFAULT_COLORS:
+                    self.query_one('#color', Select).value = a['color']
+        self.query_one('#name', Input).focus()
 
     def on_select_changed(self, event):
-        if event.value in (None, Select.BLANK):
+        if event.select.id != 'provider' or event.value in (None, Select.BLANK):
             return
         p = be.PROVIDERS[event.value]
         self.query_one('#imap', Input).value = p['imap']
@@ -190,7 +221,7 @@ class AccountScreen(Screen):
     def on_button_pressed(self, event):
         if event.button.id == 'back':
             self.app.switch_screen(
-                LoginScreen() if be.load_config().get('address') else OnboardingScreen())
+                AccountsScreen() if be.load_config().get('accounts') else OnboardingScreen())
             return
         address = self.query_one('#address', Input).value.strip()
         if '@' not in address:
@@ -198,48 +229,134 @@ class AccountScreen(Screen):
             return
         domain = address.rsplit('@', 1)[-1]
         cfg = be.load_config()
-        cfg.update(
-            address=address,
-            imap_host=self.query_one('#imap', Input).value.strip() or f'imap.{domain}',
-            smtp_host=self.query_one('#smtp', Input).value.strip() or f'smtp.{domain}',
-        )
+        accts = cfg.setdefault('accounts', [])
+        editing = self.index is not None and self.index < len(accts)
+        old = accts[self.index] if editing else {}
+        name = self.query_one('#name', Input).value.strip() or address.split('@')[0]
+        others = {a.get('name') for i, a in enumerate(accts)
+                  if not (editing and i == self.index)}
+        base, n = name, 2
+        while name in others:  # the name routes every operation — keep it unique
+            name = f'{base}{n}'
+            n += 1
+        acct = {
+            'name': name,
+            'address': address,
+            'imap_host': self.query_one('#imap', Input).value.strip() or f'imap.{domain}',
+            'smtp_host': self.query_one('#smtp', Input).value.strip() or f'smtp.{domain}',
+            'color': self.query_one('#color', Select).value,
+        }
+        pw = self.query_one('#password', Input).value
+        forget = False
+        try:
+            forget = self.query_one('#forget', Checkbox).value
+        except NoMatches:
+            pass
+        if pw:
+            acct['password'] = pw
+        elif old.get('password') and not forget:
+            acct['password'] = old['password']  # blank keeps the saved one
+        if editing:
+            accts[self.index] = acct
+        else:
+            accts.append(acct)  # a stale edit index degrades to an add, never a crash
         if not be.save_config(cfg):
             self.app.notify('Could not write the settings file — check permissions',
                             severity='error')
             return
-        self.app.notify('Account saved')
-        self.app.switch_screen(LoginScreen())
+        self.app.notify(f'Account {acct["name"]} saved')
+        self.app.switch_screen(LoginScreen() if len(accts) == 1 else AccountsScreen())
+
+
+class AccountsScreen(Screen):
+    def compose(self):
+        with Vertical(classes='card'):
+            yield Label('Accounts', classes='card-title')
+            yield ListView(id='acctlist')
+            with Horizontal(classes='buttons'):
+                yield Button('Add', variant='primary', id='add')
+                yield Button('Edit', id='edit')
+                yield Button('Remove', variant='error', id='remove')
+                yield Button('Done', id='done')
+            yield Static('Each account gets a color — shown next to its mail everywhere.',
+                         classes='hint')
+
+    def on_mount(self):
+        self.refresh_list()
+
+    def refresh_list(self):
+        lv = self.query_one('#acctlist', ListView)
+        lv.clear()
+        for a in be.load_config().get('accounts', []):
+            t = account_label(a.get('name', '?'), a.get('color', 'white'), a.get('address', ''))
+            t.append('  · password saved' if a.get('password') else '  · asks at sign-in', 'dim')
+            lv.append(ListItem(Label(t)))
+        lv.index = 0
+
+    def on_button_pressed(self, event):
+        accts = be.load_config().get('accounts', [])
+        idx = self.query_one('#acctlist', ListView).index
+        if event.button.id == 'add':
+            self.app.switch_screen(AccountFormScreen(None))
+        elif event.button.id == 'edit':
+            if idx is not None and 0 <= idx < len(accts):
+                self.app.switch_screen(AccountFormScreen(idx))
+        elif event.button.id == 'remove':
+            if idx is None or not (0 <= idx < len(accts)):
+                return
+            target = dict(accts[idx])  # remove by identity, not by (possibly stale) index
+
+            def done(ok):
+                if not ok:
+                    return
+                cfg = be.load_config()
+                lst = cfg.get('accounts', [])
+                for i, a in enumerate(lst):
+                    if ((a.get('address'), a.get('name'))
+                            == (target.get('address'), target.get('name'))):
+                        lst.pop(i)
+                        be.save_config(cfg)
+                        self.app.notify(f'Removed {target.get("address", "?")}')
+                        break
+                else:
+                    self.app.notify('That account was already removed', severity='warning')
+                self.refresh_list()
+            self.app.push_screen(
+                ConfirmScreen(f'Remove account {target.get("address", "?")}?'), done)
+        elif event.button.id == 'done':
+            self.app.switch_screen(
+                LoginScreen() if be.load_config().get('accounts') else OnboardingScreen())
 
 
 class LoginScreen(Screen):
     def compose(self):
+        self._accounts = be.load_config().get('accounts', [])
         with Vertical(classes='card'):
             yield Static(LOGO, id='logo')
             yield Static('mail, comfortably, in your terminal', classes='tagline')
-            yield Input(placeholder='Email address', id='address')
-            yield Input(placeholder='Password / app password', password=True, id='password')
-            yield Checkbox('Remember password (stored as plain text on this machine)',
-                           id='remember')
+            for i, a in enumerate(self._accounts):
+                yield Static(account_label(a.get('name', '?'), a.get('color', 'white'),
+                                           a.get('address', '')), classes='acct-row')
+                if not a.get('password'):
+                    yield Input(placeholder=f'Password for {a.get("address", "")}',
+                                password=True, id=f'pw-{i}')
+            if not self._accounts:
+                yield Static('No accounts configured yet.', classes='hint')
+            yield Checkbox('Remember typed passwords (stored as plain text)', id='remember')
             with Horizontal(classes='buttons'):
-                yield Button('Sign in', variant='primary', id='signin')
+                yield Button('Sign in', variant='primary', id='signin',
+                             disabled=not self._accounts)
                 yield Button('Demo mailbox', id='demo')
-                yield Button('Account settings', id='settings')
+                yield Button('Manage accounts', id='accounts')
             yield Static('', id='login-status')
-
-    def on_mount(self):
-        cfg = be.load_config()
-        self.query_one('#address', Input).value = cfg.get('address', '')
-        if cfg.get('password'):
-            self.query_one('#password', Input).value = cfg['password']
-            self.query_one('#remember', Checkbox).value = True
-        self.query_one('#password' if cfg.get('address') else '#address', Input).focus()
 
     def on_button_pressed(self, event):
         if event.button.id == 'demo':
-            self.app.backend = be.DemoBackend()
+            self.app.session = be.demo_session()
             self.app.switch_screen(MainScreen())
-        elif event.button.id == 'settings':
-            self.app.switch_screen(AccountScreen())
+        elif event.button.id == 'accounts':
+            self.app.switch_screen(
+                AccountsScreen() if self._accounts else AccountFormScreen(None))
         elif event.button.id == 'signin':
             self._start_signin()
 
@@ -247,45 +364,67 @@ class LoginScreen(Screen):
         self._start_signin()
 
     def _start_signin(self):
-        address = self.query_one('#address', Input).value.strip()
-        password = self.query_one('#password', Input).value
-        if '@' not in address or not password:
-            self.app.notify('Address and password are both required', severity='warning')
-            return
         cfg = be.load_config()
-        domain = address.rsplit('@', 1)[-1]
-        cfg.setdefault('imap_host', f'imap.{domain}')
-        cfg.setdefault('smtp_host', f'smtp.{domain}')
-        cfg['address'] = address
+        accts = cfg.get('accounts', [])
+        if not accts:
+            return
+        creds = []
+        for i, a in enumerate(accts):
+            pw = a.get('password', '')
+            if not pw:
+                try:
+                    pw = self.query_one(f'#pw-{i}', Input).value
+                except NoMatches:
+                    pw = ''
+            if not pw:
+                self.app.notify(f'Password needed for {a.get("address", "?")}',
+                                severity='warning')
+                return
+            creds.append((a, pw))
         self.query_one('#signin', Button).disabled = True
-        self.query_one('#login-status', Static).update(f'Connecting to {cfg["imap_host"]} …')
-        self._connect(address, password, cfg)
+        remember = self.query_one('#remember', Checkbox).value
+        self._connect(creds, cfg, remember)
 
     @work(thread=True, exclusive=True, group='login')
-    def _connect(self, address, password, cfg):
+    def _connect(self, creds, cfg, remember):
         app = self.app
-        try:
-            backend = be.ImapBackend(address, password, cfg['imap_host'], cfg['smtp_host'])
-        except Exception as exc:
-            app.call_from_thread(self._fail, exc)
-            return
-        app.call_from_thread(self._ok, backend, cfg, password)
+        good, bad = [], []
+        for a, pw in creds:
+            address = a.get('address', '')
+            domain = address.rsplit('@', 1)[-1]
+            app.call_from_thread(self._status, f'Connecting {address} …')
+            try:
+                backend = be.ImapBackend(address, pw,
+                                         a.get('imap_host') or f'imap.{domain}',
+                                         a.get('smtp_host') or f'smtp.{domain}')
+            except Exception as exc:
+                bad.append(f'{address}: {exc}')
+                continue
+            good.append((a, pw, backend))
+        app.call_from_thread(self._done, good, bad, cfg, remember)
 
     @ui_callback
-    def _fail(self, exc):
+    def _status(self, text):
+        self.query_one('#login-status', Static).update(text)
+
+    @ui_callback
+    def _done(self, good, bad, cfg, remember):
         self.query_one('#signin', Button).disabled = False
-        self.query_one('#login-status', Static).update(Text(f'✗ {exc}', style='bold red'))
-
-    @ui_callback
-    def _ok(self, backend, cfg, password):
-        if self.query_one('#remember', Checkbox).value:
-            cfg['password'] = password  # explicit opt-in; the checkbox label says it's plain text
-        else:
-            cfg.pop('password', None)
-        if not be.save_config(cfg):
-            self.app.notify('Could not write the settings file — settings not saved',
-                            severity='warning')
-        self.app.backend = backend
+        for msg in bad:
+            self.app.notify(msg, severity='error', timeout=8)
+        if not good:
+            self._status(Text('✗ no account could connect', style='bold red'))
+            return
+        if remember:
+            for a, pw, _ in good:
+                a['password'] = pw  # `a` is the dict inside cfg['accounts']
+            if not be.save_config(cfg):
+                self.app.notify('Could not write the settings file — passwords not saved',
+                                severity='warning')
+        self.app.session = be.Session([
+            be.Account(a.get('name') or a.get('address', '?'),
+                       a.get('color', be.DEFAULT_COLORS[0]), bk)
+            for a, _, bk in good])
         self.app.switch_screen(MainScreen())
 
 
@@ -312,7 +451,9 @@ class MainScreen(Screen):
         yield Header(show_clock=True)
         with Horizontal(id='main-split'):
             with Vertical(id='sidebar'):
-                yield Label('MAILBOXES', id='sidebar-title')
+                yield Label('ACCOUNTS', classes='sidebar-title')
+                yield ListView(id='accounts')
+                yield Label('MAILBOXES', classes='sidebar-title')
                 yield ListView(id='folders')
             with Vertical(id='content'):
                 yield Input(placeholder='Search this folder — Enter filters, Esc clears',
@@ -323,21 +464,25 @@ class MainScreen(Screen):
         yield Footer()
 
     def on_mount(self):
+        self.scope = None  # account name, or None = all accounts merged
         self.folder = 'INBOX'
         self.all_msgs, self.view = [], []
-        self.filter_uids = None
+        self.filter_uids = None  # set of (account, uid)
         self.folder_counts = []
         self._cache = {}
         self._pv_timer = None
         self._seq = 0  # bumped on every optimistic local change; stale loads are dropped
         table = self.query_one('#msgtable', DataTable)
         table.cursor_type = 'row'
-        table.add_column(' ', width=2)
+        table.add_column(' ', width=3)
         table.add_column('From', width=26)
         table.add_column('Subject')
         table.add_column('When', width=10)
         table.loading = True
-        self.app.sub_title = self.app.backend.address
+        accts = self.app.session.accounts
+        self.app.sub_title = (accts[0].backend.address if len(accts) == 1
+                              else f'{len(accts)} accounts')
+        self.update_accounts()
         self.set_interval(60, partial(self._load_all, False))  # quiet background poll
         self._load_all(True)
 
@@ -345,25 +490,25 @@ class MainScreen(Screen):
     @work(thread=True, exclusive=True, group='load')
     def _load_all(self, focus=False):
         app = self.app
-        seq = self._seq
+        seq, scope, folder = self._seq, self.scope, self.folder
         try:
-            counts = app.backend.folders()
-            msgs = app.backend.list_messages(self.folder)
+            counts = app.session.folders(scope)
+            msgs = app.session.list_messages(folder, scope)
         except Exception as exc:
             app.call_from_thread(self._load_failed, exc)
             return
-        app.call_from_thread(self._loaded, counts, msgs, seq, focus)
+        app.call_from_thread(self._loaded, counts, msgs, seq, scope, folder, focus)
 
     @work(thread=True, exclusive=True, group='load')
     def _load_folder(self, folder):
         app = self.app
-        seq = self._seq
+        seq, scope = self._seq, self.scope
         try:
-            msgs = app.backend.list_messages(folder)
+            msgs = app.session.list_messages(folder, scope)
         except Exception as exc:
             app.call_from_thread(self._load_failed, exc)
             return
-        app.call_from_thread(self._folder_loaded, folder, msgs, seq)
+        app.call_from_thread(self._folder_loaded, folder, msgs, seq, scope)
 
     @ui_callback
     def _load_failed(self, exc):
@@ -371,11 +516,11 @@ class MainScreen(Screen):
         self.app.notify(str(exc), severity='error', title='Mail')
 
     @ui_callback
-    def _loaded(self, counts, msgs, seq, focus):
+    def _loaded(self, counts, msgs, seq, scope, folder, focus):
         table = self.query_one('#msgtable', DataTable)
+        if seq != self._seq or scope != self.scope or folder != self.folder:
+            return  # stale snapshot; leave the spinner to the load that superseded us
         table.loading = False
-        if seq != self._seq:
-            return  # snapshot predates a local change; the next poll reconciles
         self.folder_counts = counts
         self._cache.clear()
         self.all_msgs = msgs
@@ -385,8 +530,8 @@ class MainScreen(Screen):
             table.focus()
 
     @ui_callback
-    def _folder_loaded(self, folder, msgs, seq):
-        if folder != self.folder or seq != self._seq:
+    def _folder_loaded(self, folder, msgs, seq, scope):
+        if folder != self.folder or seq != self._seq or scope != self.scope:
             return
         self._cache.clear()
         self.all_msgs = msgs
@@ -395,13 +540,35 @@ class MainScreen(Screen):
         table.loading = False
         table.focus()
 
-    def _fetch_cached(self, folder, uid):
-        key = (folder, uid)
+    def _fetch_cached(self, s, folder):
+        # folder is captured when the action fires — self.folder may change
+        # while the worker thread is still in flight
+        key = (s.account, folder, s.uid)
         if key not in self._cache:
-            self._cache[key] = self.app.backend.fetch(folder, uid)
+            self._cache[key] = self.app.session.fetch(s.account, folder, s.uid)
         return self._cache[key]
 
     # -- rendering --
+    def update_accounts(self):
+        lv = self.query_one('#accounts', ListView)
+        lv.clear()
+        session = self.app.session
+        rows = []
+        if len(session.accounts) > 1:
+            rows.append((None, Text.assemble(('● ', 'dim'), 'All accounts')))
+        for a in session.accounts:
+            rows.append((a.name, account_label(a.name, a.color)))
+        idx = 0
+        for i, (value, label) in enumerate(rows):
+            marker = Text('▸ ' if value == self.scope else '  ')
+            marker.append(label)
+            item = ListItem(Label(marker))
+            item.scope_value = value
+            lv.append(item)
+            if value == self.scope:
+                idx = i
+        lv.index = idx
+
     def update_sidebar(self):
         lv = self.query_one('#folders', ListView)
         lv.clear()
@@ -419,7 +586,7 @@ class MainScreen(Screen):
 
     def apply_filter(self, keep_cursor=False):
         self.view = [s for s in self.all_msgs
-                     if self.filter_uids is None or s.uid in self.filter_uids]
+                     if self.filter_uids is None or (s.account, s.uid) in self.filter_uids]
         self.rebuild_table(keep_cursor)
         if not self.view:
             self._set_preview(Text('Nothing here — the folder is empty or no matches.',
@@ -429,15 +596,20 @@ class MainScreen(Screen):
         table = self.query_one('#msgtable', DataTable)
         cur = table.cursor_row if keep_cursor else 0
         table.clear()
+        session = self.app.session
         for s in self.view:
-            icons = ('●' if s.unread else ' ') + ('★' if s.flagged else ' ')
             style = 'bold' if s.unread else ''
+            icons = Text.assemble(
+                ('●', session.color(s.account)),
+                ('●' if s.unread else ' ', 'cyan'),
+                ('★' if s.flagged else ' ', 'yellow'),
+            )
             table.add_row(
-                Text(icons, style='yellow' if s.flagged else 'cyan'),
+                icons,
                 Text(s.sender[:26], style=style),
                 Text(s.subject[:80], style=style),
                 Text(nice_date(s.date), style='dim'),
-                key=s.uid,
+                key=f'{s.account}/{s.uid}',
             )
         if self.view:
             table.move_cursor(row=max(0, min(cur, len(self.view) - 1)))
@@ -459,14 +631,14 @@ class MainScreen(Screen):
         if self._pv_timer is not None:
             self._pv_timer.stop()
         if 0 <= event.cursor_row < len(self.view):
-            s = self.view[event.cursor_row]
-            self._pv_timer = self.set_timer(0.25, lambda: self._load_preview(s))
+            s, folder = self.view[event.cursor_row], self.folder
+            self._pv_timer = self.set_timer(0.25, lambda: self._load_preview(s, folder))
 
     @work(thread=True, exclusive=True, group='preview')
-    def _load_preview(self, s):
+    def _load_preview(self, s, folder):
         app = self.app
         try:
-            msg = self._fetch_cached(self.folder, s.uid)
+            msg = self._fetch_cached(s, folder)
         except be.MailGone:
             app.call_from_thread(self._set_preview,
                                  Text('Message no longer exists on the server.', style='dim'))
@@ -476,15 +648,34 @@ class MainScreen(Screen):
             return
         t = Text()
         t.append(f'{s.subject}\n', style='bold')
-        t.append(f'{s.sender} · {nice_date(s.date)}\n\n', style='dim')
+        t.append(f'{s.sender} · {nice_date(s.date)}  ', style='dim')
+        t.append('● ', style=app.session.color(s.account))
+        t.append(f'{s.account}\n\n', style='dim')
         t.append(be.body_of(msg)[:4000])
         app.call_from_thread(self._set_preview, t)
 
-    # -- folders --
+    # -- accounts & folders --
     def on_list_view_selected(self, event):
-        name = getattr(event.item, 'folder_name', None)
-        if name and name != self.folder:
-            self.goto_folder(name)
+        if event.list_view.id == 'accounts':
+            if hasattr(event.item, 'scope_value') and event.item.scope_value != self.scope:
+                self.set_scope(event.item.scope_value)
+        elif event.list_view.id == 'folders':
+            name = getattr(event.item, 'folder_name', None)
+            if name and name != self.folder:
+                self.goto_folder(name)
+
+    def set_scope(self, scope):
+        if scope == self.scope:
+            return
+        self.scope = scope
+        self.folder = 'INBOX'
+        self.filter_uids = None
+        inp = self.query_one('#search', Input)
+        inp.value = ''
+        inp.remove_class('visible')
+        self.update_accounts()
+        self.query_one('#msgtable', DataTable).loading = True
+        self._load_all(True)
 
     def goto_folder(self, name):
         self.folder = name
@@ -505,22 +696,22 @@ class MainScreen(Screen):
     def on_data_table_row_selected(self, event):
         s = self.current()
         if s:
-            self._open(s)
+            self._open(s, self.folder)
 
     @work(thread=True, exclusive=True, group='open')
-    def _open(self, s):
+    def _open(self, s, folder):
         app = self.app
         try:
-            msg = self._fetch_cached(self.folder, s.uid)
+            msg = self._fetch_cached(s, folder)
         except be.MailGone:
-            app.call_from_thread(self._gone, s)
+            app.call_from_thread(self._gone, s, folder)
             return
         except Exception as exc:
             app.call_from_thread(app.notify, str(exc), severity='error')
             return
         if s.unread:
             try:
-                app.backend.mark(self.folder, s.uid, read=True)
+                app.session.mark(s.account, folder, s.uid, read=True)
             except Exception:
                 pass
         app.call_from_thread(self._show_reader, s, msg)
@@ -535,33 +726,35 @@ class MainScreen(Screen):
         self.app.push_screen(ReaderScreen(s, msg, self))
 
     @ui_callback
-    def _gone(self, s):
+    def _gone(self, s, folder):
         self.app.notify('That message no longer exists on the server', severity='warning')
         self._seq += 1
         if s in self.all_msgs:
             self.all_msgs.remove(s)
-        self._cache.pop((self.folder, s.uid), None)
-        if s.unread:
-            self._adjust_unread(self.folder, -1)
+        self._cache.pop((s.account, folder, s.uid), None)
+        if s.unread and folder == self.folder:
+            self._adjust_unread(folder, -1)
         self.apply_filter(keep_cursor=True)
 
     def action_reply(self):
         s = self.current()
         if s:
-            self._reply(s)
+            self._reply(s, self.folder)
 
     @work(thread=True, exclusive=True, group='open')
-    def _reply(self, s):
+    def _reply(self, s, folder):
         app = self.app
         try:
-            msg = self._fetch_cached(self.folder, s.uid)
+            msg = self._fetch_cached(s, folder)
         except be.MailGone:
-            app.call_from_thread(self._gone, s)
+            app.call_from_thread(self._gone, s, folder)
             return
         except Exception as exc:
             app.call_from_thread(app.notify, str(exc), severity='error')
             return
-        app.call_from_thread(self.app.push_screen, ComposeScreen(be.reply_seed(msg)))
+        seed = be.reply_seed(msg)
+        seed['account'] = s.account
+        app.call_from_thread(self.app.push_screen, ComposeScreen(seed))
 
     # -- generic fire-and-forget backend IO with optimistic UI --
     @work(thread=True, group='io')
@@ -585,7 +778,7 @@ class MainScreen(Screen):
         self.action_move(len(self.view))
 
     def action_compose(self):
-        self.app.push_screen(ComposeScreen())
+        self.app.push_screen(ComposeScreen({'account': self.scope}))
 
     def action_toggle_read(self):
         s = self.current()
@@ -593,7 +786,8 @@ class MainScreen(Screen):
             return
         s.unread = not s.unread
         self._seq += 1
-        self._io(partial(self.app.backend.mark, self.folder, s.uid, read=not s.unread))
+        self._io(partial(self.app.session.mark, s.account, self.folder, s.uid,
+                         read=not s.unread))
         self._adjust_unread(self.folder, 1 if s.unread else -1)
         self.rebuild_table(keep_cursor=True)
 
@@ -603,7 +797,8 @@ class MainScreen(Screen):
             return
         s.flagged = not s.flagged
         self._seq += 1
-        self._io(partial(self.app.backend.flag, self.folder, s.uid, flagged=s.flagged))
+        self._io(partial(self.app.session.flag, s.account, self.folder, s.uid,
+                         flagged=s.flagged))
         self.rebuild_table(keep_cursor=True)
 
     def action_delete(self):
@@ -615,10 +810,10 @@ class MainScreen(Screen):
 
     def do_delete(self, s):
         self._seq += 1
-        self._io(partial(self.app.backend.delete, self.folder, s.uid))
+        self._io(partial(self.app.session.delete, s.account, self.folder, s.uid))
         if s in self.all_msgs:
             self.all_msgs.remove(s)
-        self._cache.pop((self.folder, s.uid), None)
+        self._cache.pop((s.account, self.folder, s.uid), None)
         if s.unread:
             self._adjust_unread(self.folder, -1)
         self.apply_filter(keep_cursor=True)
@@ -652,19 +847,21 @@ class MainScreen(Screen):
     @work(thread=True, exclusive=True, group='search')
     def _search(self, folder, q):
         app = self.app
+        scope = self.scope
         try:
-            hits = app.backend.search(folder, q)
+            hits, fallback = app.session.search(folder, q, scope)
         except Exception:
-            hits = None
-        if hits is None:  # server can't do it — filter what we have locally
+            hits, fallback = set(), [a.name for a in app.session.scoped(scope)]
+        if fallback:  # accounts whose server can't search — filter what we have
             ql = q.lower()
-            hits = {s.uid for s in self.all_msgs
-                    if ql in s.sender.lower() or ql in s.subject.lower()}
-        app.call_from_thread(self._search_done, folder, q, hits)
+            hits |= {(s.account, s.uid) for s in self.all_msgs
+                     if s.account in fallback
+                     and (ql in s.sender.lower() or ql in s.subject.lower())}
+        app.call_from_thread(self._search_done, folder, q, hits, scope)
 
     @ui_callback
-    def _search_done(self, folder, q, hits):
-        if folder != self.folder:
+    def _search_done(self, folder, q, hits, scope):
+        if folder != self.folder or scope != self.scope:
             return
         self.filter_uids = hits
         self.apply_filter()
@@ -700,6 +897,7 @@ class ReaderScreen(Screen):
         super().__init__()
         self.summary, self.msg, self.main = summary, msg, main
         self.body_text = be.body_of(msg)
+        self.account_line = ''
 
     def compose(self):
         yield Header()
@@ -708,12 +906,20 @@ class ReaderScreen(Screen):
         yield Footer()
 
     def on_mount(self):
+        session = self.app.session
         t = Text()
         t.append(f'{self.msg.get("Subject") or "(no subject)"}\n\n', style='bold')
         for label in ('From', 'To', 'Cc', 'Date'):
             v = self.msg.get(label)
             if v:
                 t.append(f'{label:>8}: {v}\n', style='dim')
+        try:
+            self.account_line = f'{self.summary.account} <{session.address(self.summary.account)}>'
+            t.append(f'{"Account":>8}: ', style='dim')
+            t.append('● ', style=session.color(self.summary.account))
+            t.append(self.account_line + '\n', style='dim')
+        except StopIteration:
+            pass
         atts = be.attachments_of(self.msg)
         links = be.extract_links(self.msg)
         extras = []
@@ -732,7 +938,9 @@ class ReaderScreen(Screen):
         self.app.pop_screen()
 
     def action_reply(self):
-        self.app.push_screen(ComposeScreen(be.reply_seed(self.msg)))
+        seed = be.reply_seed(self.msg)
+        seed['account'] = self.summary.account
+        self.app.push_screen(ComposeScreen(seed))
 
     def action_links(self):
         links = be.extract_links(self.msg)
@@ -790,8 +998,13 @@ class ComposeScreen(Screen[bool]):
         self._sending = False
 
     def compose(self):
+        session = self.app.session
+        options = [(account_label(a.name, a.color, a.backend.address), a.name)
+                   for a in session.accounts]
+        value = self.seed.get('account') or session.accounts[0].name
         with Vertical():
             yield Label('✉  New message — Ctrl+S sends, Esc cancels', classes='card-title')
+            yield Select(options, value=value, allow_blank=False, id='from')
             yield Input(placeholder='To', id='to')
             yield Input(placeholder='Subject', id='subject')
             yield TextArea(id='body')
@@ -806,6 +1019,7 @@ class ComposeScreen(Screen[bool]):
     def action_send(self):
         if self._sending:
             return  # SMTP thread can't be aborted; a second Ctrl+S would send twice
+        account = self.query_one('#from', Select).value
         to = self.query_one('#to', Input).value.strip()
         subject = self.query_one('#subject', Input).value.strip()
         body = self.query_one('#body', TextArea).text
@@ -814,15 +1028,15 @@ class ComposeScreen(Screen[bool]):
             return
         self._sending = True
         self.app.notify(f'Sending to {to} …', timeout=3)
-        self._send(to, subject, body)
+        self._send(account, to, subject, body)
 
     @work(thread=True, exclusive=True, group='send')
-    def _send(self, to, subject, body):
+    def _send(self, account, to, subject, body):
         app = self.app
         try:
-            msg = be.build_message(app.backend.address, to, subject, body,
+            msg = be.build_message(app.session.address(account), to, subject, body,
                                    self.seed.get('in_reply_to'))
-            app.backend.send(msg)
+            app.session.send(account, msg)
         except Exception as exc:
             app.call_from_thread(self._send_failed, exc)
             return
@@ -855,18 +1069,24 @@ class ComposeScreen(Screen[bool]):
 # --- command palette ----------------------------------------------------------
 class MailCommands(Provider):
     async def search(self, query):
-        screen = self.app.screen
+        screen = self.screen  # app.screen is the palette itself while it's open
         if not isinstance(screen, MainScreen):
             return
         matcher = self.matcher(query)
+        session = self.app.session
         commands = [
             ('Compose new message', screen.action_compose),
             ('Refresh mailbox', screen.action_refresh),
             ('Search messages', screen.action_search),
             ('Keyboard reference', screen.action_help),
             ('Logout', self.app.action_logout),
-        ] + [(f'Open folder: {name}', partial(screen.goto_folder, name))
-             for name, _ in screen.folder_counts]
+        ]
+        if len(session.accounts) > 1:
+            commands.append(('Show all accounts', partial(screen.set_scope, None)))
+            commands += [(f'Switch to account: {a.name}', partial(screen.set_scope, a.name))
+                         for a in session.accounts]
+        commands += [(f'Open folder: {name}', partial(screen.goto_folder, name))
+                     for name, _ in screen.folder_counts]
         for label, fn in commands:
             score = matcher.match(label)
             if score > 0:
@@ -880,7 +1100,7 @@ class TuiMail(App):
     COMMANDS = App.COMMANDS | {MailCommands}
     BINDINGS = [Binding('ctrl+l', 'logout', 'Logout', show=False, priority=True)]
 
-    backend = None
+    session = None
 
     def on_mount(self):
         try:
@@ -888,12 +1108,12 @@ class TuiMail(App):
         except Exception:
             pass  # older/newer theme sets — default theme is fine
         self.push_screen(
-            LoginScreen() if be.load_config().get('address') else OnboardingScreen())
+            LoginScreen() if be.load_config().get('accounts') else OnboardingScreen())
 
     def action_logout(self):
-        if self.backend is None:
+        if self.session is None:
             return
-        old, self.backend = self.backend, None
+        old, self.session = self.session, None
         threading.Thread(target=old.close, daemon=True).start()
         self.sub_title = ''
         while len(self.screen_stack) > 1:

@@ -15,9 +15,17 @@ Button {
     margin-bottom: 1;
 }
 
-/* ---- onboarding / account / login ---------------------------------------- */
-OnboardingScreen, AccountScreen, LoginScreen {
+/* ---- onboarding / accounts / login ---------------------------------------- */
+OnboardingScreen, AccountFormScreen, AccountsScreen, LoginScreen {
     align: center middle;
+}
+.acct-row {
+    margin: 0 0 0 1;
+}
+#acctlist {
+    height: 8;
+    border: round $primary 40%;
+    margin-bottom: 1;
 }
 .card {
     width: 68;
@@ -42,6 +50,9 @@ OnboardingScreen, AccountScreen, LoginScreen {
 .card Input, .card Select {
     margin-bottom: 1;
 }
+.form-card Input, .form-card Select {
+    margin-bottom: 0;
+}
 .buttons {
     height: auto;
     align-horizontal: center;
@@ -63,13 +74,20 @@ OnboardingScreen, AccountScreen, LoginScreen {
 #sidebar:focus-within {
     border: round $accent;
 }
-#sidebar-title {
+.sidebar-title {
     color: $text-muted;
     text-style: bold;
     margin: 0 0 1 1;
 }
+#accounts {
+    background: transparent;
+    height: auto;
+    max-height: 8;
+    margin-bottom: 1;
+}
 #folders {
     background: transparent;
+    height: 1fr;
 }
 #content {
     width: 1fr;

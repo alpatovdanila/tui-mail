@@ -8,12 +8,20 @@ Python stdlib for everything mail.
 
 ## Features
 
+- **Multiple accounts** — add, edit, and remove accounts (each with its own
+  provider settings and credentials); every account gets a **color**, shown as
+  a dot next to its mail everywhere.
+- **All-in-one mode** — the default view merges every account's mailbox into
+  one list (sorted by date, colored dots tell them apart); switch to a single
+  account from the sidebar or the `Ctrl+P` palette.
+- **Account always visible** — the reader shows which account received the
+  message, and compose has a colored From-account picker.
 - **Onboarding wizard** — provider presets (Gmail, Outlook, Yandex, iCloud,
   custom) fill the servers in; app-password hints per provider.
 - **Login / logout** (`Ctrl+L`), optional remember-password (explicit opt-in,
   stored plain in the config file and labelled as such).
-- **Three-pane mailbox** — folders with unread counts, message list with
-  unread ● and star ★ markers, live preview pane.
+- **Three-pane mailbox** — accounts and folders with unread counts, message
+  list with unread ● and star ★ markers, live preview pane.
 - **Full keyboard control** — vim-style `j/k/g/G`, `?` shows the complete
   reference, `Ctrl+P` opens a command palette (jump to any folder, compose,
   refresh, logout, switch theme).

@@ -1,12 +1,13 @@
 """Acceptance loops for tuimail — run: python tests/acceptance.py
 
-Drives the real app headless through Textual's Pilot against the demo backend.
-Also asserts the pure parsing helpers, including regressions for the four
-review-confirmed bugs of the old prototype.
+Drives the real app headless through Textual's Pilot against the demo backends.
+Also asserts the pure parsing helpers, including regressions for
+review-confirmed bugs of earlier iterations.
 """
 import asyncio
 import email
 import email.policy
+import json
 import os
 import sys
 import tempfile
@@ -18,12 +19,12 @@ TMP = tempfile.mkdtemp(prefix='tuimail-test-')
 os.environ['TUIMAIL_CONFIG'] = str(Path(TMP) / 'config.json')
 os.environ['TUIMAIL_DOWNLOADS'] = TMP
 
-from textual.widgets import DataTable, Input, Select, TextArea  # noqa: E402
+from textual.widgets import DataTable, Input, ListView, Select, TextArea  # noqa: E402
 
 from tuimail import backend as be  # noqa: E402
-from tuimail.app import (AccountScreen, ComposeScreen, HelpScreen,  # noqa: E402
-                         LinksScreen, LoginScreen, MainScreen, OnboardingScreen,
-                         ReaderScreen, TuiMail)
+from tuimail.app import (AccountFormScreen, AccountsScreen, ComposeScreen,  # noqa: E402
+                         HelpScreen, LinksScreen, LoginScreen, MainScreen,
+                         OnboardingScreen, ReaderScreen, TuiMail)
 
 
 # --- phase 0: pure helpers ----------------------------------------------------
@@ -68,7 +69,41 @@ def helpers():
     # regression: config file with valid-but-not-object JSON must not crash startup
     be.config_path().write_text('"oops"', encoding='utf-8')
     assert be.load_config() == {}
+
+    # migration: pre-multi-account flat config becomes accounts[0]
+    be.config_path().write_text(json.dumps(
+        {'address': 'old@x.com', 'imap_host': 'i.x.com', 'password': 'pw'}), encoding='utf-8')
+    cfg = be.load_config()
+    a = cfg['accounts'][0]
+    assert a['address'] == 'old@x.com' and a['imap_host'] == 'i.x.com'
+    assert a['password'] == 'pw' and a['color'] == be.DEFAULT_COLORS[0]
     be.config_path().unlink()
+
+    # regression: duplicate account names are uniquified (the name routes every op)
+    s = be.Session([be.Account('john', 'red', be.DemoBackend('a@x', 'home')),
+                    be.Account('john', 'blue', be.DemoBackend('b@x', 'work'))])
+    assert [a.name for a in s.accounts] == ['john', 'john2']
+
+    # regression: one dead account must not brick the merged view; all-dead raises
+    class Dead:
+        address = 'dead@x'
+
+        def folders(self):
+            raise OSError('down')
+
+        def list_messages(self, folder, limit=100):
+            raise OSError('down')
+
+    s = be.Session([be.Account('ok', 'red', be.DemoBackend()),
+                    be.Account('dead', 'blue', Dead())])
+    assert dict(s.folders()).get('INBOX', 0) >= 1
+    assert s.list_messages('INBOX')
+    dead2 = be.Session([be.Account('d1', 'red', Dead()), be.Account('d2', 'blue', Dead())])
+    try:
+        dead2.list_messages('INBOX')
+        raise AssertionError('all-accounts failure must raise, not fake an empty folder')
+    except OSError:
+        pass
 
     assert be.extract_links(email.message_from_bytes(
         b'Content-Type: text/plain\r\n\r\nsee https://example.com/x. and http://a.b\r\n',
@@ -109,7 +144,7 @@ async def phase1():
         assert isinstance(app.screen, OnboardingScreen)
         await pilot.click('#setup')
         await pilot.pause()
-        assert isinstance(app.screen, AccountScreen)
+        assert isinstance(app.screen, AccountFormScreen)
         app.screen.query_one('#address', Input).value = 'user@gmail.com'
         app.screen.query_one('#provider', Select).value = 'Gmail'
         await pilot.pause()
@@ -117,14 +152,15 @@ async def phase1():
         assert app.screen.query_one('#smtp', Input).value == 'smtp.gmail.com:465'
         await pilot.click('#save')
         await pilot.pause()
-        assert isinstance(app.screen, LoginScreen)
-        cfg = be.load_config()
-        assert cfg['address'] == 'user@gmail.com' and cfg['imap_host'] == 'imap.gmail.com'
+        assert isinstance(app.screen, LoginScreen)  # first account -> straight to login
+        a = be.load_config()['accounts'][0]
+        assert a['address'] == 'user@gmail.com' and a['imap_host'] == 'imap.gmail.com'
+        assert a['name'] == 'user' and a['color'] in be.DEFAULT_COLORS
         await demo_login(pilot)
         await pilot.press('ctrl+l')
         await pilot.pause()
         assert isinstance(app.screen, LoginScreen)
-        assert app.backend is None
+        assert app.session is None
     print('phase 1 (onboarding/login/logout): ok')
 
 
@@ -135,7 +171,7 @@ async def phase2():
         await demo_login(pilot)
         t = table(app)
         n = t.row_count
-        assert n >= 6, n
+        assert n >= 8, n  # merged all-accounts view: home + work inboxes
         assert [name for name, _ in app.screen.folder_counts][0] == 'INBOX'
 
         await pilot.press('j', 'j')
@@ -197,8 +233,7 @@ async def phase3():
         await pilot.press('enter')
         await settle(pilot)
         assert table(app).row_count == 1
-        was_unread = app.screen.view[0].unread
-        assert was_unread
+        assert app.screen.view[0].unread
         before = unread_total(app)
         await pilot.press('enter')
         await settle(pilot)
@@ -222,12 +257,12 @@ async def phase3():
         await pilot.press('ctrl+s')
         await settle(pilot)
         assert isinstance(app.screen, MainScreen)
-        sent = app.backend.outbox[-1]
+        sent = app.session.account('personal').backend.outbox[-1]
         assert sent['To'] == 'friend@example.com'
         assert sent['Subject'] == 'Hello from tuimail'
         assert 'acceptance loop' in sent.get_content()
 
-        # reply to the encoded "Doe, John" sender prefills the right address
+        # reply to the encoded "Doe, John" sender prefills address AND account
         idx = next(i for i, s in enumerate(app.screen.view) if 'Q3 planning' in s.subject)
         table(app).move_cursor(row=idx)
         await pilot.press('r')
@@ -235,6 +270,7 @@ async def phase3():
         assert isinstance(app.screen, ComposeScreen)
         assert app.screen.query_one('#to', Input).value == 'john.doe@corp.example'
         assert app.screen.query_one('#subject', Input).value == 'Re: Q3 planning notes'
+        assert app.screen.query_one('#from', Select).value == 'personal'
         assert '> ' in app.screen.query_one('#body', TextArea).text
         # esc on an untouched reply seed closes without a confirm
         await pilot.press('escape')
@@ -253,8 +289,7 @@ async def phase4():
         # search narrows, esc restores
         await pilot.press('slash')
         await pilot.pause()
-        for ch in 'itinerary':
-            await pilot.press(ch)
+        app.screen.query_one('#search', Input).value = 'itinerary'
         await pilot.press('enter')
         await settle(pilot)
         assert table(app).row_count == 1
@@ -301,7 +336,103 @@ async def phase4():
     print('phase 4 (search/links/attachments/help): ok')
 
 
-PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4}
+# --- phase 5: multi-account ------------------------------------------------------
+async def phase5():
+    app = TuiMail()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await demo_login(pilot)
+        main = app.screen
+
+        # all-in-one mode merges both demo accounts, dots identify them
+        assert {s.account for s in main.view} == {'personal', 'work'}
+        accounts_list = main.query_one('#accounts', ListView)
+        assert len(accounts_list.children) == 3  # All + personal + work
+        assert app.session.color('personal') != app.session.color('work')
+
+        # switch scope to a single account
+        main.set_scope('work')
+        await settle(pilot)
+        assert main.view and all(s.account == 'work' for s in main.view)
+        assert any('Standup notes' in s.subject for s in main.view)
+
+        # reader announces the owning account
+        await pilot.press('enter')
+        await settle(pilot)
+        reader = app.screen
+        assert isinstance(reader, ReaderScreen)
+        assert 'work' in reader.account_line and 'work@tuimail.demo' in reader.account_line
+        await pilot.press('q')
+        await pilot.pause()
+
+        # compose defaults its From to the current scope; send goes via that account
+        await pilot.press('c')
+        await pilot.pause()
+        assert isinstance(app.screen, ComposeScreen)
+        assert app.screen.query_one('#from', Select).value == 'work'
+        app.screen.query_one('#to', Input).value = 'x@y.z'
+        app.screen.query_one('#subject', Input).value = 'from work'
+        await pilot.press('ctrl+s')
+        await settle(pilot)
+        wb = app.session.account('work').backend
+        assert wb.outbox[-1]['From'] == 'work@tuimail.demo'
+        assert not app.session.account('personal').backend.outbox
+
+        # back to the merged view
+        app.screen.set_scope(None)
+        await settle(pilot)
+        assert {s.account for s in app.screen.view} == {'personal', 'work'}
+    print('phase 5 (multi-account/all-in-one): ok')
+
+
+# --- phase 6: account management -------------------------------------------------
+async def phase6():
+    app = TuiMail()
+    async with app.run_test(size=(120, 40)) as pilot:
+        assert isinstance(app.screen, LoginScreen)
+        await pilot.click('#accounts')
+        await pilot.pause()
+        assert isinstance(app.screen, AccountsScreen)
+
+        # add a second account
+        await pilot.click('#add')
+        await pilot.pause()
+        assert isinstance(app.screen, AccountFormScreen)
+        app.screen.query_one('#address', Input).value = 'user@yandex.ru'
+        app.screen.query_one('#provider', Select).value = 'Yandex'
+        await pilot.pause()
+        await pilot.click('#save')
+        await pilot.pause()
+        assert isinstance(app.screen, AccountsScreen)
+        accts = be.load_config()['accounts']
+        assert len(accts) == 2 and accts[1]['address'] == 'user@yandex.ru'
+        assert accts[1]['name'] == 'user2'  # same local part -> auto-uniquified name
+        assert accts[0]['color'] != accts[1]['color']  # auto-assigned distinct colors
+
+        # edit the second account's name
+        app.screen.query_one('#acctlist', ListView).index = 1
+        await pilot.click('#edit')
+        await pilot.pause()
+        assert isinstance(app.screen, AccountFormScreen)
+        app.screen.query_one('#name', Input).value = 'backup'
+        await pilot.click('#save')
+        await pilot.pause()
+        assert be.load_config()['accounts'][1]['name'] == 'backup'
+
+        # remove it again
+        assert isinstance(app.screen, AccountsScreen)
+        app.screen.query_one('#acctlist', ListView).index = 1
+        await pilot.click('#remove')
+        await pilot.pause()
+        await pilot.press('y')
+        await pilot.pause()
+        assert len(be.load_config()['accounts']) == 1
+        await pilot.click('#done')
+        await pilot.pause()
+        assert isinstance(app.screen, LoginScreen)
+    print('phase 6 (account management): ok')
+
+
+PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5, '6': phase6}
 
 
 async def main():
