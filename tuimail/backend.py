@@ -144,6 +144,7 @@ class Summary:
     unread: bool = False
     flagged: bool = False
     account: str = ''  # set by Session when listing
+    recipient: str = ''  # shown instead of sender in Sent-style folders
 
 
 # A hostile message must not smuggle terminal escape sequences onto the
@@ -345,8 +346,15 @@ def reply_seed(msg) -> dict:
     quoted = '\n'.join('> ' + ln for ln in body_of(msg).splitlines())
     body = f'\n\nOn {date}, {addr or "they"} wrote:\n{quoted}\n'
     mid = str(msg.get('Message-ID') or '')
+    name = ''
+    try:
+        if frm is not None and frm.addresses:
+            name = frm.addresses[0].display_name
+    except Exception:
+        pass
     return {'to': addr, 'subject': subject, 'body': body,
-            'in_reply_to': ' '.join(mid.split())}
+            'in_reply_to': ' '.join(mid.split()),
+            'reply_to': sanitize(name or addr, keep_newlines=False)}
 
 
 def markup_html(body) -> str | None:
@@ -376,8 +384,16 @@ def markup_html(body) -> str | None:
     return '<html><body>' + '<br>\n'.join(out) + '</body></html>'
 
 
+def err_text(exc) -> str:
+    """Exception -> readable text (imaplib raises with bytes payloads)."""
+    parts = []
+    for a in getattr(exc, 'args', ()) or ():
+        parts.append(a.decode('utf-8', 'replace') if isinstance(a, bytes) else str(a))
+    return sanitize(' '.join(p for p in parts if p) or str(exc), keep_newlines=False)
+
+
 def build_message(sender, to, subject, body, in_reply_to=None,
-                  attachments=None) -> EmailMessage:
+                  attachments=None, markup=False) -> EmailMessage:
     m = EmailMessage()
     m['From'], m['To'], m['Subject'] = sender, to, subject
     m['Date'] = email.utils.formatdate(localtime=True)
@@ -388,7 +404,9 @@ def build_message(sender, to, subject, body, in_reply_to=None,
     if in_reply_to:
         m['In-Reply-To'] = m['References'] = ' '.join(in_reply_to.split())
     m.set_content(body)
-    rich = markup_html(body)
+    # HTML alternative only when the composer's format keys were used — plain
+    # text mail with incidental *asterisks* stays plain text
+    rich = markup_html(body) if markup else None
     if rich:
         m.add_alternative(rich, subtype='html')
     for path in attachments or []:
@@ -430,6 +448,7 @@ def parse_fetch_headers(resp) -> list[Summary]:
             date=parse_date(h['Date']),
             unread=b'\\Seen' not in flags,
             flagged=b'\\Flagged' in flags,
+            recipient=nice_from(h['To']),
         ))
     out.sort(key=lambda s: s.date or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return out
@@ -543,7 +562,7 @@ class ImapBackend:
                 return []
             typ, resp = self._conn.uid(
                 'fetch', b','.join(uids),
-                '(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])')
+                '(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])')
             return parse_fetch_headers(resp or [])
         return self._retry(go)
 
@@ -858,7 +877,8 @@ class DemoBackend:
         out = [Summary(uid=it['uid'], sender=_nice_from_msg(it['msg']),
                        subject=str(it['msg'].get('Subject') or '(no subject)'),
                        date=parse_date(it['msg'].get('Date')),
-                       unread=it['unread'], flagged=it['flagged'])
+                       unread=it['unread'], flagged=it['flagged'],
+                       recipient=nice_from(str(it['msg'].get('To') or '')))
                for it in self._data.get(folder, [])]
         out.sort(key=lambda s: s.date or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return out

@@ -10,7 +10,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App
 from textual.binding import Binding
-from textual.command import Hit, Provider
+from textual.command import DiscoveryHit, Hit, Provider
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
@@ -18,6 +18,7 @@ from textual.widgets import (Button, Checkbox, DataTable, DirectoryTree,
                              Footer, Header, Input, Label, ListItem, ListView,
                              Markdown, OptionList, Select, Static, TextArea)
 
+from . import __version__
 from . import backend as be
 from . import update as up
 from .backend import nice_date
@@ -33,20 +34,22 @@ WELCOME = (
     '    Yandex, iCloud or any custom server\n'
     '  • multiple accounts, each with its own color\n'
     '  • your credentials never leave this machine\n'
-    '  • press ? anywhere for the keyboard reference\n'
+    '  • press ? or F1 anywhere for the keyboard reference\n'
 )
 
 HELP_ROWS = [
     ('Mailbox', ''),
     ('● / ○', 'unread / read — the circle color is the account'),
     ('j / k / ↑ ↓', 'move through messages'),
-    ('Space', 'select messages — d/u/s act on all, Esc cancels'),
+    ('J / K · p', 'scroll the preview · hide/show it'),
     ('g / G', 'first / last message'),
     ('Enter', 'open message'),
-    ('Tab', 'cycle panes (accounts · folders · list)'),
+    ('Space', 'select · Ctrl+A selects everything shown · Esc cancels'),
+    ('Tab', 'cycle panes (list · accounts · folders)'),
+    ('0 1 2 …', 'all accounts · account 1, 2 …'),
     ('c / r', 'compose / reply'),
     ('u / s', 'toggle unread / star'),
-    ('d', 'delete (asks first)'),
+    ('d', 'delete'),
     ('/', 'search this folder (Esc clears)'),
     ('R', 'refresh'),
     ('', ''),
@@ -56,18 +59,31 @@ HELP_ROWS = [
     ('Ctrl+O', 'attach a file (Tab completes paths)'),
     ('', ''),
     ('Reader', ''),
-    ('j k Space', 'scroll / page'),
-    ('o', 'open a link from the message'),
-    ('a', 'save attachments to Downloads'),
+    ('j k Space b', 'scroll / page down / page up'),
+    ('g G Ctrl+D Ctrl+U', 'top / bottom / half page'),
+    ('o / a', 'links / save attachments'),
     ('q / Esc', 'back'),
     ('', ''),
     ('Anywhere', ''),
-    ('Ctrl+P', 'palette — switch account, folder, theme'),
-    ('Ctrl+U', 'install a waiting update'),
+    ('Ctrl+P', 'palette — every command, account, folder, theme'),
+    ('? / F1', 'this help'),
     ('Ctrl+L', 'logout'),
-    ('?', 'this help'),
-    ('q', 'quit (from the mailbox)'),
+    ('q', 'quit from the mailbox (asks first)'),
+    ('Ctrl+Q', 'quit immediately'),
 ]
+
+
+def boxed(label, value):
+    """Checkbox label with an unambiguous state glyph — Textual's toggle draws
+    the same X in both states and only changes its color."""
+    return ('☑ ' if value else '☐ ') + label
+
+
+def rebox(checkbox, value):
+    base = str(getattr(checkbox.label, 'plain', checkbox.label))
+    if base[:2] in ('☑ ', '☐ '):
+        base = base[2:]
+    checkbox.label = boxed(base, value)
 
 
 def ui_callback(fn):
@@ -133,10 +149,16 @@ class ConfirmScreen(ModalScreen[bool]):
 
 
 class HelpScreen(ModalScreen):
-    BINDINGS = [Binding('escape,q,question_mark', 'close', 'Close')]
+    BINDINGS = [
+        Binding('escape,q,question_mark,f1', 'close', 'Close'),
+        Binding('j', 'scroll(2)', 'Down', show=False),
+        Binding('k', 'scroll(-2)', 'Up', show=False),
+        Binding('space', 'scroll(12)', 'Page', show=False),
+    ]
 
     def compose(self):
-        rt = RichTable(box=None, padding=(0, 2, 0, 0), title='Keyboard reference',
+        rt = RichTable(box=None, padding=(0, 2, 0, 0),
+                       title=f'Keyboard reference — tuimail {__version__}',
                        title_style='bold cyan', title_justify='left')
         rt.add_column('Key', style='bold yellow')
         rt.add_column('Action')
@@ -145,8 +167,14 @@ class HelpScreen(ModalScreen):
                 rt.add_row(Text(key, style='bold cyan underline'), '')
             else:
                 rt.add_row(key, action)
-        with Vertical(id='help-card'):
+        with VerticalScroll(id='help-card'):  # scrolls on short terminals
             yield Static(rt)
+
+    def on_mount(self):
+        self.query_one('#help-card', VerticalScroll).focus()
+
+    def action_scroll(self, dy):
+        self.query_one('#help-card', VerticalScroll).scroll_relative(y=dy, animate=False)
 
     def action_close(self):
         self.dismiss()
@@ -242,6 +270,11 @@ class OnboardingScreen(Screen):
 
 class AccountFormScreen(Screen):
     """Add (index=None) or edit (index=i) one account."""
+    BINDINGS = [
+        Binding('escape', 'back', 'Back'),
+        Binding('ctrl+s', 'save', 'Save', priority=True),
+        Binding('question_mark,f1', 'help', 'Help', show=False),
+    ]
 
     def __init__(self, index):
         super().__init__()
@@ -259,11 +292,12 @@ class AccountFormScreen(Screen):
             yield Input(placeholder='SMTP host (host or host:port)', id='smtp')
             yield Select([(Text.assemble(('● ', c), c), c) for c in be.DEFAULT_COLORS],
                          value=be.next_color(cfg), allow_blank=False, id='color')
-            yield Input(placeholder='Password (blank = keep saved / ask at sign-in; stored plain if filled)',
-                        password=True, id='password')
+            yield Static('Password — optional. Blank: asked at sign-in. '
+                         'Filled: stored on this machine as plain text.', classes='hint')
+            yield Input(placeholder='Password', password=True, id='password')
             if (self.index is not None and self.index < len(cfg.get('accounts', []))
                     and cfg['accounts'][self.index].get('password')):
-                yield Checkbox('Forget the saved password', id='forget')
+                yield Checkbox(boxed('Forget the saved password', False), id='forget')
             yield Static('Pick a provider to fill the servers in, or type your own.',
                          id='provider-hint', classes='hint')
             with Horizontal(classes='buttons'):
@@ -271,6 +305,7 @@ class AccountFormScreen(Screen):
                 yield Button('Back', id='back')
 
     def on_mount(self):
+        self.query_one('.form-card').can_focus = False  # not a Tab stop
         if self.index is not None:
             accts = be.load_config().get('accounts', [])
             if 0 <= self.index < len(accts):
@@ -281,6 +316,11 @@ class AccountFormScreen(Screen):
                 self.query_one('#smtp', Input).value = a.get('smtp_host', '')
                 if a.get('color') in be.DEFAULT_COLORS:
                     self.query_one('#color', Select).value = a['color']
+                # keep the provider context (and its app-password hint) on edit
+                for pname, p in be.PROVIDERS.items():
+                    if p['imap'] and p['imap'] == a.get('imap_host'):
+                        self.query_one('#provider', Select).value = pname
+                        break
         self.query_one('#name', Input).focus()
 
     def on_select_changed(self, event):
@@ -291,11 +331,26 @@ class AccountFormScreen(Screen):
         self.query_one('#smtp', Input).value = p['smtp']
         self.query_one('#provider-hint', Static).update(p['hint'])
 
+    def on_checkbox_changed(self, event):
+        rebox(event.checkbox, event.value)
+
+    def on_input_submitted(self, event):
+        self.action_save()
+
+    def action_help(self):
+        self.app.push_screen(HelpScreen())
+
+    def action_back(self):
+        self.app.switch_screen(
+            AccountsScreen() if be.load_config().get('accounts') else OnboardingScreen())
+
     def on_button_pressed(self, event):
         if event.button.id == 'back':
-            self.app.switch_screen(
-                AccountsScreen() if be.load_config().get('accounts') else OnboardingScreen())
-            return
+            self.action_back()
+        else:
+            self.action_save()
+
+    def action_save(self):
         address = self.query_one('#address', Input).value.strip()
         if '@' not in address:
             self.app.notify('Enter a valid email address', severity='warning')
@@ -342,20 +397,74 @@ class AccountFormScreen(Screen):
 
 
 class AccountsScreen(Screen):
+    BINDINGS = [
+        Binding('escape', 'done', 'Done'),
+        Binding('a', 'add', 'Add', show=False),
+        Binding('e', 'edit', 'Edit', show=False),
+        Binding('x', 'remove', 'Remove', show=False),
+        Binding('question_mark,f1', 'help', 'Help', show=False),
+    ]
+
     def compose(self):
-        with Vertical(classes='card'):
+        with VerticalScroll(classes='card'):
             yield Label('Accounts', classes='card-title')
             yield ListView(id='acctlist')
             with Horizontal(classes='buttons'):
-                yield Button('Add', variant='primary', id='add')
-                yield Button('Edit', id='edit')
-                yield Button('Remove', variant='error', id='remove')
-                yield Button('Done', id='done')
-            yield Static('Each account gets a color — shown next to its mail everywhere.',
-                         classes='hint')
+                yield Button('Add (a)', variant='primary', id='add')
+                yield Button('Edit (e)', id='edit')
+                yield Button('Remove (x)', variant='error', id='remove')
+                yield Button('Done (Esc)', id='done')
+            yield Static('Each account gets a color — shown next to its mail everywhere. '
+                         'Enter on an account edits it.', classes='hint')
 
     def on_mount(self):
+        self.query_one('.card').can_focus = False
         self.refresh_list()
+        self.query_one('#acctlist', ListView).focus()
+
+    def on_list_view_selected(self, event):
+        self.action_edit()
+
+    def action_help(self):
+        self.app.push_screen(HelpScreen())
+
+    def action_add(self):
+        self.app.switch_screen(AccountFormScreen(None))
+
+    def action_edit(self):
+        idx = self.query_one('#acctlist', ListView).index
+        accts = be.load_config().get('accounts', [])
+        if idx is not None and 0 <= idx < len(accts):
+            self.app.switch_screen(AccountFormScreen(idx))
+
+    def action_remove(self):
+        accts = be.load_config().get('accounts', [])
+        idx = self.query_one('#acctlist', ListView).index
+        if idx is None or not (0 <= idx < len(accts)):
+            return
+        target = dict(accts[idx])  # remove by identity, not by (possibly stale) index
+
+        def done(ok):
+            if not ok:
+                return
+            cfg = be.load_config()
+            lst = cfg.get('accounts', [])
+            for i, a in enumerate(lst):
+                if ((a.get('address'), a.get('name'))
+                        == (target.get('address'), target.get('name'))):
+                    lst.pop(i)
+                    be.save_config(cfg)
+                    self.app.notify(f'Removed {target.get("address", "?")}')
+                    break
+            else:
+                self.app.notify('That account was already removed', severity='warning')
+            self.refresh_list()
+        self.app.push_screen(
+            ConfirmScreen(f'Remove account {target.get("address", "?")}?'), done)
+
+    def action_done(self):
+        self.app.switch_screen(
+            LoginScreen() if be.load_config().get('accounts') else OnboardingScreen())
 
     def refresh_list(self):
         lv = self.query_one('#acctlist', ListView)
@@ -367,41 +476,19 @@ class AccountsScreen(Screen):
         lv.index = 0
 
     def on_button_pressed(self, event):
-        accts = be.load_config().get('accounts', [])
-        idx = self.query_one('#acctlist', ListView).index
-        if event.button.id == 'add':
-            self.app.switch_screen(AccountFormScreen(None))
-        elif event.button.id == 'edit':
-            if idx is not None and 0 <= idx < len(accts):
-                self.app.switch_screen(AccountFormScreen(idx))
-        elif event.button.id == 'remove':
-            if idx is None or not (0 <= idx < len(accts)):
-                return
-            target = dict(accts[idx])  # remove by identity, not by (possibly stale) index
-
-            def done(ok):
-                if not ok:
-                    return
-                cfg = be.load_config()
-                lst = cfg.get('accounts', [])
-                for i, a in enumerate(lst):
-                    if ((a.get('address'), a.get('name'))
-                            == (target.get('address'), target.get('name'))):
-                        lst.pop(i)
-                        be.save_config(cfg)
-                        self.app.notify(f'Removed {target.get("address", "?")}')
-                        break
-                else:
-                    self.app.notify('That account was already removed', severity='warning')
-                self.refresh_list()
-            self.app.push_screen(
-                ConfirmScreen(f'Remove account {target.get("address", "?")}?'), done)
-        elif event.button.id == 'done':
-            self.app.switch_screen(
-                LoginScreen() if be.load_config().get('accounts') else OnboardingScreen())
+        {'add': self.action_add, 'edit': self.action_edit,
+         'remove': self.action_remove, 'done': self.action_done}[event.button.id]()
 
 
 class LoginScreen(Screen):
+    BINDINGS = [Binding('question_mark,f1', 'help', 'Help', show=False)]
+
+    def action_help(self):
+        self.app.push_screen(HelpScreen())
+
+    def on_checkbox_changed(self, event):
+        rebox(event.checkbox, event.value)
+
     def on_mount(self):
         # every password saved -> no reason to make the user press Sign in;
         # the app-level latch keeps an explicit logout sticky across every
@@ -428,7 +515,9 @@ class LoginScreen(Screen):
                                 password=True, id=f'pw-{i}')
             if not self._accounts:
                 yield Static('No accounts configured yet.', classes='hint')
-            yield Checkbox('Remember typed passwords (stored as plain text)', id='remember')
+            if any(not a.get('password') for a in self._accounts):
+                yield Checkbox(boxed('Remember typed passwords (stored as plain text)', False),
+                               id='remember')
             with Horizontal(classes='buttons'):
                 yield Button('Sign in', variant='primary', id='signin',
                              disabled=not self._accounts)
@@ -447,6 +536,16 @@ class LoginScreen(Screen):
             self._start_signin()
 
     def on_input_submitted(self, event):
+        # several accounts without saved passwords: Enter moves to the next
+        # empty password field, and only the last one submits
+        for i in range(len(self._accounts)):
+            try:
+                inp = self.query_one(f'#pw-{i}', Input)
+            except NoMatches:
+                continue
+            if not inp.value and inp is not event.input:
+                inp.focus()
+                return
         self._start_signin()
 
     def _start_signin(self):
@@ -468,7 +567,10 @@ class LoginScreen(Screen):
                 return
             creds.append((a, pw))
         self.query_one('#signin', Button).disabled = True
-        remember = self.query_one('#remember', Checkbox).value
+        try:
+            remember = self.query_one('#remember', Checkbox).value
+        except NoMatches:
+            remember = False
         self._connect(creds, cfg, remember)
 
     @work(thread=True, exclusive=True, group='login')
@@ -484,7 +586,7 @@ class LoginScreen(Screen):
                                          a.get('imap_host') or f'imap.{domain}',
                                          a.get('smtp_host') or f'smtp.{domain}')
             except Exception as exc:
-                bad.append(f'{address}: {exc}')
+                bad.append(f'{address}: {be.err_text(exc)}')
                 continue
             good.append((a, pw, backend))
         app.call_from_thread(self._done, good, bad, cfg, remember)
@@ -530,12 +632,16 @@ class MainScreen(Screen):
         Binding('u', 'toggle_read', 'Read/unread', show=False),
         Binding('s', 'toggle_flag', 'Star', show=False),
         Binding('space', 'toggle_select', 'Select', show=False),
+        Binding('ctrl+a', 'select_all', 'Select all', show=False),
+        Binding('J', 'scroll_preview(3)', 'Preview down', show=False),
+        Binding('K', 'scroll_preview(-3)', 'Preview up', show=False),
+        Binding('p', 'toggle_preview', 'Preview', show=False),
         Binding('slash', 'search', 'Search', key_display='/'),
         Binding('escape', 'cancel_mode', 'Cancel', show=False),
         Binding('R', 'refresh', 'Refresh'),
         Binding('question_mark', 'help', 'Help', key_display='?'),
         Binding('q', 'quit_app', 'Quit'),
-    ]
+    ] + [Binding(str(n), f'scope_key({n})', 'Account', show=False) for n in range(10)]
 
     def compose(self):
         yield Header(show_clock=True)
@@ -563,22 +669,40 @@ class MainScreen(Screen):
         self.folder_counts = []
         self._cache = {}
         self._pv_timer = None
+        self._preview_key = None  # (account, uid) currently shown in the preview
         self._seq = 0  # bumped on every optimistic local change; stale loads are dropped
         table = self.query_one('#msgtable', DataTable)
         table.cursor_type = 'row'
         table.cursor_background_priority = 'css'  # cursor stays visible over selection tint
-        table.add_column(' ', width=2)
-        table.add_column('From', width=26)
-        table.add_column('Subject')
-        table.add_column('When', width=10)
         table.loading = True
+        # the preview is scrolled from the list (J/K) — not a Tab stop
+        self.query_one('#preview-scroll', VerticalScroll).can_focus = False
         accts = self.app.session.accounts
         self.app.sub_title = (accts[0].backend.address if len(accts) == 1
                               else f'{len(accts)} accounts')
         self.update_accounts()
+        self._apply_layout()
         self.set_interval(60, partial(self._load_all, False))  # quiet background poll
         self._load_all(True)
         self.app.maybe_offer_cli()
+
+    # -- responsive layout --
+    def on_resize(self, event):
+        self._apply_layout()
+
+    def _apply_layout(self):
+        width = self.size.width
+        self.query_one('#sidebar').display = width >= 90  # palette still switches
+        if self.view:
+            self.rebuild_table(keep_cursor=True)
+
+    def _column_widths(self):
+        width = self.size.width
+        avail = width - (28 if width >= 90 else 0) - 4  # sidebar + borders
+        when = 10 if avail >= 70 else 6
+        frm = max(12, min(26, avail // 4))
+        subject = max(12, avail - 2 - frm - when - 8)  # 8 = cell padding x4 columns
+        return frm, subject, when
 
     # -- data loading --
     @work(thread=True, exclusive=True, group='load')
@@ -703,8 +827,24 @@ class MainScreen(Screen):
 
     def rebuild_table(self, keep_cursor=False):
         table = self.query_one('#msgtable', DataTable)
-        cur = table.cursor_row if keep_cursor else 0
-        table.clear()
+        cur_row = table.cursor_row if keep_cursor else 0
+        cur_key = None
+        if keep_cursor and 0 <= table.cursor_row < table.row_count:
+            # read the identity from the table itself — self.view may already
+            # hold the new ordering by the time we get here
+            try:
+                from textual.coordinate import Coordinate
+                cur_key = table.coordinate_to_cell_key(
+                    Coordinate(table.cursor_row, 0)).row_key.value
+            except Exception:
+                cur_key = None
+        table.clear(columns=True)
+        frm_w, subj_w, when_w = self._column_widths()
+        sent_like = 'sent' in be.decode_folder(self.folder).lower()
+        table.add_column(' ', width=2)
+        table.add_column('To' if sent_like else 'From', width=frm_w)
+        table.add_column('Subject', width=subj_w)
+        table.add_column('When', width=when_w)
         session = self.app.session
         sel_bg = self._sel_bg()
         for s in self.view:
@@ -716,15 +856,23 @@ class MainScreen(Screen):
                 ('●' if s.unread else '○', session.color(s.account) + bg),
                 ('★' if s.flagged else ' ', 'yellow' + bg),
             )
-            table.add_row(
-                icons,
-                Text(s.sender[:26], style=style),
-                Text(s.subject[:80], style=style),
-                Text(nice_date(s.date), style='dim' + bg),
-                key=f'{s.account}/{s.uid}',
-            )
+            who = Text((s.recipient if sent_like else s.sender) or s.sender, style=style)
+            who.truncate(frm_w, overflow='ellipsis')
+            subj = Text(s.subject, style=style)
+            subj.truncate(subj_w, overflow='ellipsis')
+            when = nice_date(s.date)
+            if len(when) > when_w:
+                when = when[-when_w:]  # '2026-09-02' -> '09-02' in narrow panes
+            table.add_row(icons, who, subj, Text(when, style='dim' + bg),
+                          key=f'{s.account}/{s.uid}')
         if self.view:
-            table.move_cursor(row=max(0, min(cur, len(self.view) - 1)))
+            # restore by message identity: a poll that inserts new mail must not
+            # leave the cursor on a different message at the same row number
+            idx = next((i for i, s in enumerate(self.view)
+                        if f'{s.account}/{s.uid}' == cur_key), None)
+            if idx is None:
+                idx = max(0, min(cur_row, len(self.view) - 1))
+            table.move_cursor(row=idx)
 
     # -- selection mode --
     def _selected_msgs(self):
@@ -744,15 +892,48 @@ class MainScreen(Screen):
         bar.display = bool(n)
         footer.display = not n
 
+    def _table_focused(self):
+        """Message-list actions only fire when the list itself has focus — a
+        key pressed in the sidebar must never act on an invisible cursor."""
+        return self.query_one('#msgtable', DataTable).has_focus
+
     def action_toggle_select(self):
+        if not self._table_focused():
+            return
         s = self.current()
         if not s:
             return
         key = (s.account, s.uid)
-        self.selected.symmetric_difference_update({key})
+        table = self.query_one('#msgtable', DataTable)
+        if key in self.selected and table.cursor_row == len(self.view) - 1:
+            pass  # last row on key-repeat: stay selected instead of flapping
+        else:
+            self.selected.symmetric_difference_update({key})
         self.update_selection_ui()
         self.rebuild_table(keep_cursor=True)
         self.action_move(1)  # advance like a file manager
+
+    def action_select_all(self):
+        if not self._table_focused() or not self.view:
+            return
+        keys = {(s.account, s.uid) for s in self.view}
+        self.selected = set() if self.selected == keys else keys
+        self.update_selection_ui()
+        self.rebuild_table(keep_cursor=True)
+
+    def action_scroll_preview(self, dy):
+        self.query_one('#preview-scroll', VerticalScroll).scroll_relative(y=dy, animate=False)
+
+    def action_toggle_preview(self):
+        pane = self.query_one('#preview-scroll', VerticalScroll)
+        pane.display = not pane.display
+
+    def action_scope_key(self, n):
+        accts = self.app.session.accounts
+        if n == 0:
+            self.set_scope(None if len(accts) > 1 else accts[0].name)
+        elif n <= len(accts):
+            self.set_scope(accts[n - 1].name)
 
     def action_cancel_mode(self):
         if self.selected:
@@ -763,8 +944,9 @@ class MainScreen(Screen):
         self.action_clear_search()
 
     @ui_callback
-    def _set_preview(self, content):
+    def _set_preview(self, content, key=None):
         self.preview_text = getattr(content, 'plain', str(content))
+        self._preview_key = key
         self.query_one('#preview', Static).update(content)
         self.query_one('#preview-scroll', VerticalScroll).scroll_home(animate=False)
 
@@ -780,6 +962,8 @@ class MainScreen(Screen):
             self._pv_timer.stop()
         if 0 <= event.cursor_row < len(self.view):
             s, folder = self.view[event.cursor_row], self.folder
+            if (s.account, s.uid) == self._preview_key:
+                return  # same message (table was rebuilt) — keep the preview and its scroll
             self._pv_timer = self.set_timer(0.25, lambda: self._load_preview(s, folder))
 
     @work(thread=True, exclusive=True, group='preview')
@@ -800,7 +984,7 @@ class MainScreen(Screen):
         t.append('● ', style=app.session.color(s.account))
         t.append(f'{s.account}\n\n', style='dim')
         t.append(be.body_of(msg)[:4000])
-        app.call_from_thread(self._set_preview, t)
+        app.call_from_thread(self._set_preview, t, (s.account, s.uid))
 
     # -- accounts & folders --
     def on_list_view_selected(self, event):
@@ -920,7 +1104,7 @@ class MainScreen(Screen):
         try:
             fn()
         except Exception as exc:
-            self.app.call_from_thread(self.app.notify, str(exc),
+            self.app.call_from_thread(self.app.notify, be.err_text(exc),
                                       severity='error', title='Mail')
         if reload:
             self.app.call_from_thread(self._after_bulk)
@@ -934,6 +1118,10 @@ class MainScreen(Screen):
 
     # -- actions --
     def action_move(self, delta):
+        focused = self.app.focused
+        if isinstance(focused, ListView):  # j/k drive whichever list has focus
+            (focused.action_cursor_down if delta > 0 else focused.action_cursor_up)()
+            return
         table = self.query_one('#msgtable', DataTable)
         if table.row_count:
             table.move_cursor(row=max(0, min(table.cursor_row + delta, table.row_count - 1)))
@@ -945,9 +1133,14 @@ class MainScreen(Screen):
         self.action_move(len(self.view))
 
     def action_compose(self):
-        self.app.push_screen(ComposeScreen({'account': self.scope}))
+        # merged view: the highlighted message's account is the least surprising From
+        s = self.current()
+        account = self.scope or (s.account if s else None)
+        self.app.push_screen(ComposeScreen({'account': account}))
 
     def action_toggle_read(self):
+        if not self._table_focused():
+            return
         targets = self._selected_msgs() or ([self.current()] if self.current() else [])
         if not targets:
             return
@@ -969,6 +1162,8 @@ class MainScreen(Screen):
         self.rebuild_table(keep_cursor=True)
 
     def action_toggle_flag(self):
+        if not self._table_focused():
+            return
         targets = self._selected_msgs() or ([self.current()] if self.current() else [])
         if not targets:
             return
@@ -989,6 +1184,8 @@ class MainScreen(Screen):
         self.rebuild_table(keep_cursor=True)
 
     def action_delete(self):
+        if not self._table_focused():
+            return
         targets = self._selected_msgs()
         if targets:
             self.app.push_screen(
@@ -1047,7 +1244,12 @@ class MainScreen(Screen):
         self.app.push_screen(HelpScreen())
 
     def action_quit_app(self):
-        self.app.exit()
+        # q is "back" one screen deeper — never let a stray press kill the session
+        if self.selected or self.filter_uids is not None:
+            self.action_cancel_mode()
+            return
+        self.app.push_screen(ConfirmScreen('Quit tuimail? (Ctrl+Q quits without asking)'),
+                             lambda ok: self.app.exit() if ok else None)
 
     # -- search --
     def action_search(self):
@@ -1232,24 +1434,28 @@ class ComposeScreen(Screen[bool]):
         Binding('ctrl+b', 'fmt_bold', 'Bold', priority=True),
         Binding('ctrl+e', 'fmt_italic', 'Italic', priority=True),
         Binding('ctrl+k', 'fmt_link', 'Link', priority=True),
+        Binding('f1', 'help', 'Help', show=False),
     ]
 
     def __init__(self, seed=None):
         super().__init__()
         self.seed = seed or {}
         self._sending = False
+        self._used_markup = False
         self.attachments = []
 
     def compose(self):
         session = self.app.session
         options = [(account_label(a.name, a.color, a.backend.address), a.name)
                    for a in session.accounts]
-        value = self.seed.get('account') or session.accounts[0].name
+        self._initial_from = self.seed.get('account') or session.accounts[0].name
+        title = (f'✉  Reply to {self.seed["reply_to"]}' if self.seed.get('reply_to')
+                 else '✉  New message')
         with Vertical():
-            yield Label('✉  New message — ^S send · ^O attach · '
-                        '^B bold · ^E italic · ^K link · Esc cancel',
-                        classes='card-title')
-            yield Select(options, value=value, allow_blank=False, id='from')
+            yield Label(title, classes='card-title')
+            with Horizontal(id='from-row'):
+                yield Label('From')
+                yield Select(options, value=self._initial_from, allow_blank=False, id='from')
             yield Input(placeholder='To', id='to')
             yield Input(placeholder='Subject', id='subject')
             yield Static(id='attach-line')
@@ -1261,6 +1467,9 @@ class ComposeScreen(Screen[bool]):
         self.query_one('#subject', Input).value = self.seed.get('subject', '')
         self.query_one('#body', TextArea).text = self.seed.get('body', '')
         self.query_one('#body' if self.seed.get('to') else '#to').focus()
+
+    def action_help(self):
+        self.app.push_screen(HelpScreen())
 
     # -- formatting & attachments --
     def _body_focused(self):
@@ -1279,6 +1488,7 @@ class ComposeScreen(Screen[bool]):
         else:
             ta.insert(left + right)
             ta.move_cursor_relative(columns=-len(right))
+        self._used_markup = True
         ta.focus()
 
     def action_fmt_bold(self):
@@ -1295,6 +1505,7 @@ class ComposeScreen(Screen[bool]):
         start, end = sorted((ta.selection.start, ta.selection.end))
         ta.replace(f'[{label}](https://)', start, end)
         ta.move_cursor_relative(columns=-1)  # cursor inside the (), after https://
+        self._used_markup = True
         ta.focus()
 
     def action_attach(self):
@@ -1329,7 +1540,7 @@ class ComposeScreen(Screen[bool]):
             self.app.notify('Add a recipient first', severity='warning')
             return
         self._sending = True
-        self.app.notify(f'Sending to {to} …', timeout=3)
+        self.app.notify(f'Sending from {account} to {to} …', timeout=3)
         self._send(account, to, subject, body)
 
     @work(thread=True, exclusive=True, group='send')
@@ -1338,30 +1549,37 @@ class ComposeScreen(Screen[bool]):
         try:
             msg = be.build_message(app.session.address(account), to, subject, body,
                                    self.seed.get('in_reply_to'),
-                                   attachments=self.attachments)
+                                   attachments=self.attachments,
+                                   markup=self._used_markup)
             app.session.send(account, msg)
         except Exception as exc:
             app.call_from_thread(self._send_failed, exc)
             return
-        app.call_from_thread(self._sent, to)
+        app.call_from_thread(self._sent, account, to)
 
     def _send_failed(self, exc):
         # the draft stays open — nothing typed is lost on a failed send
         self._sending = False
-        self.app.notify(f'Send failed, draft kept: {exc}', severity='error', timeout=8)
+        self.app.notify(f'Send failed, draft kept: {be.err_text(exc)}',
+                        severity='error', timeout=8)
 
-    def _sent(self, to):
+    def _sent(self, account, to):
         self._sending = False
-        self.app.notify(f'Sent to {to}')
+        self.app.notify(f'Sent from {account} to {to}')
         if self.app.screen is self:
             self.dismiss(True)  # dismiss pops the CURRENT screen — only pop ourselves
 
     def action_cancel(self):
+        sel = self.query_one('#from', Select)
+        if sel.expanded:
+            sel.expanded = False  # Esc closes the open dropdown, nothing more
+            return
         to = self.query_one('#to', Input).value
         subject = self.query_one('#subject', Input).value
         body = self.query_one('#body', TextArea).text
         dirty = (to != self.seed.get('to', '') or subject != self.seed.get('subject', '')
-                 or body != self.seed.get('body', '') or bool(self.attachments))
+                 or body != self.seed.get('body', '') or bool(self.attachments)
+                 or sel.value != self._initial_from)
         if not dirty:
             self.dismiss(False)
             return
@@ -1371,11 +1589,25 @@ class ComposeScreen(Screen[bool]):
 
 # --- command palette ----------------------------------------------------------
 class MailCommands(Provider):
+    async def discover(self):
+        # empty query: show the app's own commands, not just Textual's stock ones
+        screen = self.screen
+        if not isinstance(screen, MainScreen):
+            return
+        for label, fn in self._commands(screen):
+            yield DiscoveryHit(label, fn)
+
     async def search(self, query):
         screen = self.screen  # app.screen is the palette itself while it's open
         if not isinstance(screen, MainScreen):
             return
         matcher = self.matcher(query)
+        for label, fn in self._commands(screen):
+            score = matcher.match(label)
+            if score > 0:
+                yield Hit(score, matcher.highlight(label), fn)
+
+    def _commands(self, screen):
         session = self.app.session
         commands = [
             ('Compose new message', screen.action_compose),
@@ -1398,20 +1630,18 @@ class MailCommands(Provider):
         if up.install_kind() == 'macos' and not up.cli_installed():
             commands.append(('Install the tuimail terminal command',
                              self.app._install_cli))
-        for label, fn in commands:
-            score = matcher.match(label)
-            if score > 0:
-                yield Hit(score, matcher.highlight(label), fn)
+        return commands
 
 
 # --- app ----------------------------------------------------------------------
 class TuiMail(App):
     CSS_PATH = 'app.tcss'
-    TITLE = 'tuimail'
+    TITLE = f'tuimail {__version__}'
     COMMANDS = App.COMMANDS | {MailCommands}
     BINDINGS = [
         Binding('ctrl+l', 'logout', 'Logout', show=False, priority=True),
         Binding('ctrl+u', 'update_app', 'Update', show=False),
+        Binding('f1', 'help', 'Help', show=False, priority=True),
     ]
 
     session = None
@@ -1419,6 +1649,8 @@ class TuiMail(App):
     update_info = None
     restart_after_exit = False
     _notified_update = ''
+    _update_state = 'never'  # never | checking | ok | failed | off
+    _update_checked_at = None
 
     def on_mount(self):
         try:
@@ -1429,18 +1661,43 @@ class TuiMail(App):
                 and not os.environ.get('TUIMAIL_NO_UPDATE_CHECK')):
             self.set_interval(up.CHECK_EVERY, self._check_updates)
             self._check_updates()
+        else:
+            self._update_state = 'off'
         self.push_screen(
             LoginScreen() if be.load_config().get('accounts') else OnboardingScreen())
+
+    def action_help(self):
+        if isinstance(self.screen, HelpScreen):
+            self.pop_screen()
+        else:
+            self.push_screen(HelpScreen())
 
     # -- updates --
     @work(thread=True, exclusive=True, group='update-check')
     def _check_updates(self):
+        import time
+        self._update_state = 'checking'
         try:
             info = up.check_latest()
         except Exception:
-            return  # offline / rate-limited — the next interval retries
+            self._update_state = 'failed'  # offline / rate-limited — next interval retries
+            return
+        self._update_state = 'ok'
+        self._update_checked_at = time.time()
         if info and up.is_newer(info['version']):
             self.call_from_thread(self._update_available, info)
+
+    def _update_status_text(self):
+        import time
+        state = self._update_state
+        if state == 'off':
+            return 'Update checks are off ("update_check": false in the config)'
+        if state in ('never', 'checking'):
+            return 'The update check has not completed yet'
+        if state == 'failed':
+            return 'The last update check failed (offline?) — Ctrl+P → Check for updates now'
+        mins = int((time.time() - (self._update_checked_at or time.time())) // 60)
+        return f'You are on the newest version ({__version__}, checked {mins} min ago)'
 
     def _update_available(self, info):
         self.update_info = info
@@ -1456,12 +1713,12 @@ class TuiMail(App):
 
     def _report_check(self):
         if not self.update_info:
-            self.notify('You are on the newest version')
+            self.notify(self._update_status_text())
 
     def action_update_app(self):
         info = self.update_info
         if not info:
-            self.notify('You are on the newest version')
+            self.notify(self._update_status_text())
             return
         kind = up.install_kind()
         if kind == 'pip':
@@ -1473,9 +1730,15 @@ class TuiMail(App):
             self.notify('Self-update only works for the released binaries',
                         severity='warning')
             return
-        self.push_screen(
-            ConfirmScreen(f'Update tuimail to {info["version"]} and restart?'),
-            lambda ok: self._apply_update(info) if ok else None)
+        asset = info['assets'].get(up.asset_name()) or {}
+        if asset.get('sha256'):
+            prompt = (f'Update tuimail to {info["version"]}? Downloads {up.asset_name()} '
+                      f'from github.com — sha256 verified before install. Restarts after.')
+        else:
+            prompt = (f'Update to {info["version"]}? WARNING: this release publishes no '
+                      f'integrity digest, so the download cannot be verified. Install anyway?')
+        self.push_screen(ConfirmScreen(prompt),
+                         lambda ok: self._apply_update(info) if ok else None)
 
     @work(thread=True, exclusive=True, group='update')
     def _apply_update(self, info):
@@ -1533,5 +1796,6 @@ class TuiMail(App):
         self.sub_title = ''
         while len(self.screen_stack) > 1:
             self.pop_screen()
-        self.push_screen(LoginScreen())
+        self.push_screen(
+            LoginScreen() if be.load_config().get('accounts') else OnboardingScreen())
         self.notify('Signed out')

@@ -4,6 +4,41 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.10.0 — 2026-09-02
+
+The first batch from the six-persona usability study (P0):
+
+### Changed
+- **Keys respect focus**: j/k drive whichever list has focus (accounts,
+  folders, messages); Space/d/u/s act only when the message list is focused —
+  no more invisible-cursor actions from the sidebar. The preview pane left
+  the Tab cycle; J/K scroll it from the list and p hides/shows it.
+- **Responsive mailbox**: columns are computed from the terminal width (the
+  list never scrolls sideways, the date stays visible, long text ellipsizes),
+  the preview is proportional, and the sidebar collapses below 90 columns
+  (accounts and folders stay reachable via Ctrl+P and the 0-9 keys).
+- **Help screen** scrolls, shows the version, and opens with ? or F1 on
+  every screen — including setup and compose.
+- **Setup screens** take Esc (back), Ctrl+S / Enter (save), and Enter on an
+  account to edit it; buttons fit the cards; the login card scrolls; the
+  password-storage warning is a visible label; checkboxes show ☑/☐.
+- **Compose** in the merged view defaults From to the highlighted message's
+  account, the From row is labeled, replies are titled "Reply to <name>",
+  the Sent toast names the account, changing From counts as a draft change,
+  and Esc closes an open dropdown before it closes anything else.
+- **Plain text stays plain**: the HTML alternative is generated only when the
+  format keys were actually used, never from incidental *asterisks*.
+- **q asks before quitting** (Ctrl+Q still quits at once) and first clears a
+  selection or search filter instead — a stray q no longer kills the session.
+- **Cursor and preview survive reloads**: the cursor follows the message
+  (not the row number) when new mail arrives, and the preview keeps its
+  scroll position.
+- Update status is honest (off / not yet checked / failed / checked N min
+  ago); a release without an integrity digest asks before installing; the
+  running version shows in the header.
+- Sent folders show the recipient; Ctrl+A selects everything shown; Enter
+  moves between password fields at login; error toasts are decoded text.
+
 ## 1.9.2 — 2026-09-02
 
 ### Security

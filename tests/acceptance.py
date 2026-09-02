@@ -180,7 +180,10 @@ def helpers():
 
     # compose markup: bold/italic/link become an HTML alternative, escaped
     rich = be.build_message('a@b.c', 'x@y.z', 's',
-                            '**bold** and *it* [go](https://x.y) <script>')
+                            '**bold** and *it* [go](https://x.y) <script>', markup=True)
+    # without the composer's format keys, incidental asterisks stay plain text
+    assert be.build_message('a@b.c', 'x@y.z', 's', '2*3*4 and *emphasis*'
+                            ).get_body(preferencelist=('html',)) is None
     html_part = rich.get_body(preferencelist=('html',))
     assert html_part is not None
     html_src = html_part.get_content()
@@ -812,8 +815,99 @@ async def phase10():
     print('phase 10 (compose formatting/attachments): ok')
 
 
+# --- phase 11: UX-study P0 fixes --------------------------------------------------
+async def phase11():
+    from textual.containers import VerticalScroll
+    from tuimail.app import ConfirmScreen, HelpScreen, MailCommands
+    app = TuiMail()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await demo_login(pilot)
+        main = app.screen
+        t = table(app)
+
+        # help card scrolls, names the version, closes on F1
+        await pilot.press('question_mark')
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+        assert isinstance(app.screen.query_one('#help-card'), VerticalScroll)
+        await pilot.press('f1')
+        await pilot.pause()
+        assert isinstance(app.screen, MainScreen)
+
+        # j/k drive the focused sidebar list; Space/d never act on the hidden cursor
+        folders = main.query_one('#folders', ListView)
+        folders.focus()
+        await pilot.pause()
+        row_before = t.cursor_row
+        await pilot.press('j')
+        assert t.cursor_row == row_before and folders.index == 1, (t.cursor_row, folders.index)
+        await pilot.press('space', 'd')
+        await pilot.pause()
+        assert not main.selected and isinstance(app.screen, MainScreen)
+        t.focus()
+        await pilot.pause()
+
+        # the preview pane is not a Tab stop
+        assert not main.query_one('#preview-scroll').can_focus
+
+        # compose in the merged view seeds From from the highlighted message
+        idx = next(i for i, s in enumerate(main.view) if s.account == 'work')
+        t.move_cursor(row=idx)
+        await pilot.pause()
+        await pilot.press('c')
+        await pilot.pause()
+        assert app.screen.query_one('#from', Select).value == 'work'
+        # ...and changing only From makes the draft dirty
+        app.screen.query_one('#from', Select).value = 'personal'
+        await pilot.pause()
+        await pilot.press('escape')
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press('y')
+        await pilot.pause()
+        assert isinstance(app.screen, MainScreen)
+
+        # palette lists the app's commands on an empty query
+        labels = [str(h.display) async for h in MailCommands(app.screen).discover()]
+        assert any('Compose' in lab for lab in labels), labels
+
+        # cursor survives a reload by identity, not by row number
+        key = (main.view[2].account, main.view[2].uid)
+        t.move_cursor(row=2)
+        await pilot.pause()
+        main.all_msgs.insert(0, main.all_msgs.pop())  # simulate new mail on top
+        main.apply_filter(keep_cursor=True)
+        assert (main.current().account, main.current().uid) == key
+
+        # q asks before quitting; a stray q never kills the session
+        await pilot.press('q')
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press('n')
+        await pilot.pause()
+        assert isinstance(app.screen, MainScreen) and app.is_running
+
+        # preview toggles
+        await pilot.press('p')
+        assert not main.query_one('#preview-scroll').display
+        await pilot.press('p')
+        assert main.query_one('#preview-scroll').display
+
+    # narrow pane: sidebar collapses and the table never scrolls sideways
+    app = TuiMail()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await demo_login(pilot)
+        main = app.screen
+        t = table(app)
+        assert not main.query_one('#sidebar').display
+        assert t.virtual_size.width <= t.size.width, (t.virtual_size, t.size)
+        assert t.row_count >= 6  # the list keeps most of the screen
+    print('phase 11 (P0: help/focus/layout/quit/compose): ok')
+
+
 PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5,
-          '6': phase6, '7': phase7, '8': phase8, '9': phase9, '10': phase10}
+          '6': phase6, '7': phase7, '8': phase8, '9': phase9, '10': phase10,
+          '11': phase11}
 
 
 async def main():
