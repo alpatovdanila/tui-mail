@@ -1,4 +1,4 @@
-# tuimail installer — irm https://raw.githubusercontent.com/alpatovdanila/tui-mail/main/install.ps1 | iex
+# tuimail installer - irm https://raw.githubusercontent.com/alpatovdanila/tui-mail/main/install.ps1 | iex
 # Installs the latest release to %LOCALAPPDATA%\Programs\tuimail, sha256-verified.
 # Knobs: $env:TUIMAIL_INSTALL_DIR overrides the target dir; $env:TUIMAIL_NO_PATH=1 skips the PATH edit.
 $ErrorActionPreference = 'Stop'
