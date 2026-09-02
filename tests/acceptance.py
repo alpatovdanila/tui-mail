@@ -18,10 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 TMP = tempfile.mkdtemp(prefix='tuimail-test-')
 os.environ['TUIMAIL_CONFIG'] = str(Path(TMP) / 'config.json')
 os.environ['TUIMAIL_DOWNLOADS'] = TMP
+os.environ['TUIMAIL_NO_UPDATE_CHECK'] = '1'  # never hit the GitHub API from tests
 
 from textual.widgets import DataTable, Input, ListView, Select, TextArea  # noqa: E402
 
 from tuimail import backend as be  # noqa: E402
+from tuimail import update as up  # noqa: E402
 from tuimail.app import (AccountFormScreen, AccountsScreen, ComposeScreen,  # noqa: E402
                          HelpScreen, LinksScreen, LoginScreen, MainScreen,
                          OnboardingScreen, ReaderScreen, TuiMail)
@@ -153,6 +155,11 @@ def helpers():
         be.imaplib.IMAP4_SSL = orig
     ctx = captured['ctx']
     assert ctx is not None and ctx.verify_mode == _ssl.CERT_REQUIRED and ctx.check_hostname
+
+    # updater basics: version compare and platform asset selection
+    assert up.parse_version('v1.2.3') == (1, 2, 3)
+    assert up.is_newer('v99.0.0') and not up.is_newer('v0.0.1') and not up.is_newer('')
+    assert up.asset_name() in ('tuimail-windows.exe', 'tuimail-macos-universal')
 
     # HTML mail converts to markdown for the reader (headings, bold, links kept)
     rich_html = email.message_from_bytes(
@@ -610,8 +617,29 @@ async def phase7():
     print('phase 7 (auto sign-in): ok')
 
 
+# --- phase 8: update notifications -----------------------------------------------
+async def phase8():
+    app = TuiMail()
+    orig = up.check_latest
+    up.check_latest = lambda timeout=10: {'version': 'v99.0.0', 'assets': {}}
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._check_updates()
+            await settle(pilot)
+            assert app.update_info and app.update_info['version'] == 'v99.0.0'
+            # not frozen -> Ctrl+U explains the pip path instead of self-updating
+            await pilot.press('ctrl+u')
+            await pilot.pause()
+            from tuimail.app import ConfirmScreen
+            assert not isinstance(app.screen, ConfirmScreen)
+    finally:
+        up.check_latest = orig
+    print('phase 8 (update check): ok')
+
+
 PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5,
-          '6': phase6, '7': phase7}
+          '6': phase6, '7': phase7, '8': phase8}
 
 
 async def main():

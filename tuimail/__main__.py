@@ -5,6 +5,8 @@ def main():
     from .app import TuiMail
     if '--check' in sys.argv:  # headless boot smoke test, used by CI
         import asyncio
+        import os
+        os.environ['TUIMAIL_NO_UPDATE_CHECK'] = '1'
         import email
         import email.policy
 
@@ -22,7 +24,11 @@ def main():
         asyncio.run(go())
         print('ok')
         return
-    TuiMail().run()
+    app = TuiMail()
+    app.run()
+    if getattr(app, 'restart_after_exit', False):
+        import os
+        os.execv(sys.executable, [sys.executable] + sys.argv[1:])
 
 
 if __name__ == '__main__':

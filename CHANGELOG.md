@@ -4,6 +4,18 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.6.0 — 2026-09-02
+
+### Added
+- **Auto-update**: the app checks GitHub for a newer release every 15 minutes
+  (and at start), shows a notification, and Ctrl+U installs it after a
+  confirmation — download over verified TLS, sha256-checked against the
+  release digest, then the binary swaps itself and restarts (macOS replaces
+  in place; Windows swaps via a helper after exit). pip/pipx installs are
+  pointed at the right upgrade command instead. Disable the check with
+  `"update_check": false` in the config; nothing but the version request
+  ever goes to GitHub.
+
 ## 1.5.1 — 2026-09-02
 
 ### Fixed

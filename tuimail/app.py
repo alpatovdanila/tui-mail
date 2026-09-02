@@ -1,4 +1,5 @@
 """tuimail — a keyboard-first TUI email client built on Textual."""
+import os
 import threading
 import webbrowser
 from functools import partial, wraps
@@ -18,6 +19,7 @@ from textual.widgets import (Button, Checkbox, DataTable, Footer, Header,
                              OptionList, Select, Static, TextArea)
 
 from . import backend as be
+from . import update as up
 from .backend import nice_date
 
 LOGO = (
@@ -54,6 +56,7 @@ HELP_ROWS = [
     ('', ''),
     ('Anywhere', ''),
     ('Ctrl+P', 'palette — switch account, folder, theme'),
+    ('Ctrl+U', 'install a waiting update'),
     ('Ctrl+L', 'logout'),
     ('?', 'this help'),
     ('q', 'quit (from the mailbox)'),
@@ -1132,18 +1135,85 @@ class TuiMail(App):
     CSS_PATH = 'app.tcss'
     TITLE = 'tuimail'
     COMMANDS = App.COMMANDS | {MailCommands}
-    BINDINGS = [Binding('ctrl+l', 'logout', 'Logout', show=False, priority=True)]
+    BINDINGS = [
+        Binding('ctrl+l', 'logout', 'Logout', show=False, priority=True),
+        Binding('ctrl+u', 'update_app', 'Update', show=False),
+    ]
 
     session = None
     auto_login = True
+    update_info = None
+    restart_after_exit = False
+    _notified_update = ''
 
     def on_mount(self):
         try:
             self.theme = 'tokyo-night'
         except Exception:
             pass  # older/newer theme sets — default theme is fine
+        if (be.load_config().get('update_check', True)
+                and not os.environ.get('TUIMAIL_NO_UPDATE_CHECK')):
+            self.set_interval(up.CHECK_EVERY, self._check_updates)
+            self._check_updates()
         self.push_screen(
             LoginScreen() if be.load_config().get('accounts') else OnboardingScreen())
+
+    # -- updates --
+    @work(thread=True, exclusive=True, group='update-check')
+    def _check_updates(self):
+        try:
+            info = up.check_latest()
+        except Exception:
+            return  # offline / rate-limited — the next interval retries
+        if info and up.is_newer(info['version']):
+            self.call_from_thread(self._update_available, info)
+
+    def _update_available(self, info):
+        self.update_info = info
+        if self._notified_update != info['version']:
+            self._notified_update = info['version']
+            self.notify(f'tuimail {info["version"]} is available — Ctrl+U to update',
+                        timeout=10)
+
+    def action_update_app(self):
+        info = self.update_info
+        if not info:
+            self.notify('You are on the newest version')
+            return
+        kind = up.install_kind()
+        if kind == 'pip':
+            self.notify('Installed via pip — update with: pipx upgrade tuimail  (or '
+                        'pip install -U git+https://github.com/alpatovdanila/tui-mail.git)',
+                        timeout=12)
+            return
+        if kind == 'unsupported':
+            self.notify('Self-update only works for the released binaries',
+                        severity='warning')
+            return
+        self.push_screen(
+            ConfirmScreen(f'Update tuimail to {info["version"]} and restart?'),
+            lambda ok: self._apply_update(info) if ok else None)
+
+    @work(thread=True, exclusive=True, group='update')
+    def _apply_update(self, info):
+        try:
+            asset = info['assets'].get(up.asset_name())
+            if not asset or not asset.get('url'):
+                raise ValueError('this release has no binary for your platform')
+            self.call_from_thread(self.notify, f'Downloading {info["version"]} …')
+            staged = up.download(asset['url'], asset.get('sha256', ''),
+                                 up.target_path().parent)
+            mode = up.apply_update(staged)
+        except Exception as exc:
+            self.call_from_thread(self.notify, f'Update failed: {exc}',
+                                  severity='error', timeout=8)
+            return
+        self.call_from_thread(self._update_done, mode)
+
+    def _update_done(self, mode):
+        if mode == 'restart':
+            self.restart_after_exit = True  # __main__ re-execs the new binary
+        self.exit()
 
     def action_logout(self):
         if self.session is None:

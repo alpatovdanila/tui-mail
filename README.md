@@ -31,6 +31,8 @@ Python stdlib for everything mail.
 - **Attachment saving** (`a`) — straight to `~/Downloads`, collision-safe.
 - **Reply** with quoted body and proper `In-Reply-To`/`References` threading.
 - Background refresh every 60 s; failed sends keep your draft open.
+- **Auto-update** — new releases are announced in-app (checked every 15 min);
+  `Ctrl+U` downloads, verifies, swaps the binary, and restarts.
 - **Demo mailbox** — try the whole UI without an account.
 
 ## Run
@@ -132,7 +134,10 @@ regression-tested in the acceptance suite):
   (settings next to the exe on removable/shared media).
 - Outgoing mail does not leak your hostname or LAN IP (Message-ID and EHLO).
 - The login screen always shows which server each password will be sent to.
-- Nothing is sent anywhere except your own configured mail servers.
+- Nothing is sent anywhere except your own configured mail servers — plus one
+  anonymous version request to api.github.com every 15 minutes for the update
+  check (downloads are sha256-verified against the release digest); set
+  `"update_check": false` in the config to turn it off.
 
 Known accepted risks: binaries are unsigned (macOS Gatekeeper warns once);
 GitHub Actions are pinned by major version, not commit SHA.
