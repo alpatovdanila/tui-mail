@@ -838,7 +838,9 @@ class MainScreen(Screen):
     def _loaded(self, counts, per_account, msgs, seq, scope, requested, folder, focus):
         table = self.query_one('#msgtable', DataTable)
         if seq != self._seq or scope != self.scope or requested != self.folder:
-            return  # stale snapshot; leave the spinner to the load that superseded us
+            if table.loading and scope == self.scope and requested == self.folder:
+                self._load_all(focus)  # a local change invalidated this snapshot: go again
+            return  # otherwise the load that superseded us owns the spinner
         if folder != requested:
             self.folder = folder  # the scope had no such folder; INBOX it is
         table.loading = False
@@ -1113,7 +1115,7 @@ class MainScreen(Screen):
             if rec is not None:
                 signed_in = {a.name for a in app.session.accounts}
                 failed = app.outbox.status(rec, signed_in) == 'failed'
-                t.append(f'To {rec["to"]}\n', style='dim')
+                t.append(f'To {be.sanitize(rec["to"], keep_newlines=False)}\n', style='dim')
                 t.append(app.outbox.describe(rec, signed_in) + '\n',
                          style='bold yellow' if failed else 'italic cyan')
         t.append(f'{s.sender} · {nice_date(s.date)}  ', style='dim')
@@ -1294,7 +1296,7 @@ class MainScreen(Screen):
             self.app.notify('That message has already left the Outbox')
             self._outbox_changed()
             return
-        if s.uid in outbox.sending:
+        if outbox.is_sending(s.uid):
             self.app.notify('This message is being sent right now')
             return
         outbox.hold(s.uid)  # the sender must not deliver it while it is being edited
@@ -1560,7 +1562,7 @@ class MainScreen(Screen):
             return  # already on its way
         folder = self.folder
         if folder == be.OUTBOX:
-            if s.uid in self.app.outbox.sending:
+            if self.app.outbox.is_sending(s.uid):
                 self.app.notify('This message is being sent right now')
                 return
             self.app.outbox.hold(s.uid)  # the sender must not deliver it during the undo window
@@ -1919,6 +1921,13 @@ class ComposeScreen(Screen[bool]):
             yield TextArea(id='body')
         yield Footer()
 
+    def on_unmount(self):
+        # however the composer goes away (Esc, send, logout, quit): an Outbox
+        # record opened for editing goes back to the sender's queue
+        old = self.seed.get('outbox_id')
+        if old and self.app.outbox is not None:
+            self.app.outbox.release(old)
+
     def on_mount(self):
         self.query_one('#to', Input).value = self.seed.get('to', '')
         self.query_one('#subject', Input).value = self.seed.get('subject', '')
@@ -2003,7 +2012,7 @@ class ComposeScreen(Screen[bool]):
             return
         app, outbox = self.app, self.app.outbox
         old = self.seed.get('outbox_id')
-        if old and old in outbox.sending:
+        if old and outbox.is_sending(old):
             app.notify('This message is being sent right now — nothing to change')
             return
         # queued locally first: the composer closes at once and the sender
@@ -2124,6 +2133,7 @@ class TuiMail(App):
         except Exception:
             pass  # older/newer theme sets — default theme is fine
         self.outbox = ob.Outbox()
+        self.outbox.recover()  # a send interrupted by a crash goes back to the queue
         self._outbox_kick, self._outbox_force = threading.Event(), False
         threading.Thread(target=self._outbox_loop, daemon=True, name='outbox').start()
         if (be.load_config().get('update_check', True)
@@ -2173,13 +2183,14 @@ class TuiMail(App):
                 pass  # the sender must outlive any single bad record or a closing app
 
     def _outbox_sent(self, rec):
-        self.notify(escape(f'Sent to {rec["to"]}'))
+        self.notify(escape(f'Sent to {be.sanitize(rec["to"], keep_newlines=False)}'))
         main = self._main_screen()
         if main is not None:
             main._outbox_changed()
 
     def _outbox_failed(self, rec, exc):
-        self.notify(escape(f'Not sent to {rec["to"]}: {be.err_text(exc)} — kept in Outbox'),
+        self.notify(escape(f'Not sent to {be.sanitize(rec["to"], keep_newlines=False)}: '
+                           f'{be.err_text(exc)} — kept in Outbox'),
                     severity='error', timeout=8)
         main = self._main_screen()
         if main is not None:

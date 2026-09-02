@@ -38,6 +38,16 @@ class MailGone(Exception):
 OUTBOX = 'tuimail:Outbox'
 
 
+class PartialDelivery(smtplib.SMTPRecipientsRefused):
+    """Some recipients were refused after the others had accepted the mail."""
+
+    def __str__(self):
+        bad = ', '.join(f'{addr} ({code} {err_text(Exception(msg))})'
+                        for addr, (code, msg) in self.recipients.items())
+        return (f'not delivered to {bad}; the other recipients did get it - '
+                'resend to the failed address only')
+
+
 # --- config ------------------------------------------------------------------
 PROVIDERS = {
     'Gmail': {
@@ -490,7 +500,9 @@ def _smtp_send_once(host, port, address, password, msg) -> None:
         if port != 465:
             s.starttls(context=tls)
         s.login(address, password)
-        s.send_message(msg)
+        refused = s.send_message(msg)  # smtplib raises only when EVERY recipient is refused
+        if refused:
+            raise PartialDelivery(refused)
 
 
 def smtp_send(smtp_host, address, password, msg) -> None:
@@ -757,7 +769,8 @@ class Session:
             raise last_err  # every account failed — that's an outage, not an empty list
         counts = [(n, merged[n]) for n in order]
         if self.outbox is not None:
-            names = None if scope is None else {a.name for a in accts}
+            # a single-account session has no merged view: it sees everything
+            names = None if scope is None or len(self.accounts) == 1 else {a.name for a in accts}
             queued = len(self.outbox.summaries(names))
             counts.insert(min(1, len(counts)), (OUTBOX, queued))  # right under INBOX
         return counts, per_account
@@ -826,7 +839,8 @@ class Session:
                 return []
             # the merged view also shows mail queued for an account that is
             # not signed in right now — otherwise it could never be deleted
-            return self.outbox.summaries(None if scope is None else {scope},
+            everything = scope is None or len(self.accounts) == 1
+            return self.outbox.summaries(None if everything else {scope},
                                          signed_in={a.name for a in self.accounts})
         accts = self.scoped(scope)
         out, ok, last_err = [], 0, None

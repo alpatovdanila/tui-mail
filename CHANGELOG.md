@@ -18,7 +18,12 @@ with these notes automatically.
   attachments wait for you. In the Outbox, `Enter` reopens the message in the
   composer (resending keeps its Message-ID), `R` retries everything now, `d`
   deletes (with the usual undo). Mail still queued when you quit goes out at
-  the next start.
+  the next start. Attachments are snapshotted when you press `Ctrl+S`, so a
+  retry sends what you attached even if the file changed since; a partial
+  delivery (some recipients refused after the others accepted) is reported
+  instead of counted as sent; 4xx greylisting retries by itself; two tuimail
+  windows on one spool never deliver the same message twice, and a send
+  interrupted by a crash goes back to the queue with a note.
 - `tuimail --version`.
 - Both installers now notice another `tuimail` earlier on PATH (a stale
   `pip install` in `Python\Scripts`, or `/usr/local/bin/tuimail` left by an

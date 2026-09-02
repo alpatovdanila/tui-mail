@@ -30,7 +30,10 @@ Python stdlib for everything mail.
   Enter opens it in your browser.
 - **Attachment saving** (`a`) — straight to `~/Downloads`, collision-safe.
 - **Reply** with quoted body and proper `In-Reply-To`/`References` threading.
-- Background refresh every 60 s; failed sends keep your draft open.
+- **Outbox** — `Ctrl+S` queues the message locally and closes the composer
+  at once; a background sender delivers it, and anything the server refused
+  waits in the Outbox folder with its error until you edit, retry or delete
+  it. Background refresh every 60 s.
 - **Auto-update** — new releases are announced in-app (checked every 15 min);
   `Ctrl+U` downloads, verifies, swaps the binary, and restarts.
 - **Demo mailbox** — try the whole UI without an account.
@@ -114,6 +117,20 @@ pyinstaller --onefile --console --name tuimail --collect-all textual --add-data 
 | Compose | `Ctrl+S` / `Esc` | send (queues to the Outbox, closes at once) / cancel |
 | Compose | `Ctrl+B` `Ctrl+E` `Ctrl+K` / `Ctrl+O` | bold, italic, link / attach |
 | Outbox  | `Enter` / `R` / `d` | edit an unsent message / retry now / delete |
+
+## Outbox
+
+`Ctrl+S` writes the message to `~/.tuimail.outbox/` (next to the exe in
+portable mode; owner-only files, attachments snapshotted at that moment) and
+closes the composer. A background sender delivers it and toasts the result. A
+message the server refused stays in the **Outbox** folder, right under INBOX,
+with the error in the preview: `Enter` reopens it in the composer (resending
+keeps its Message-ID), `R` retries everything now, `d` deletes it. Connection
+errors, timeouts and 4xx replies (greylisting) retry by themselves with
+backoff; 5xx replies, refused recipients, bad credentials, a partial delivery
+and a missing attachment wait for you. Anything still queued when you quit is
+sent at the next start, and two tuimail windows on one spool never deliver
+the same message twice.
 | Anywhere| `Ctrl+P` / `Ctrl+L` / `?` `F1` | palette / logout / help |
 | Anywhere| `q` / `Ctrl+Q` | quit from the mailbox (asks) / quit now |
 

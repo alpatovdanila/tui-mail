@@ -30,11 +30,16 @@ Move-Item -Force $tmp $exe
 
 if (-not $env:TUIMAIL_NO_PATH) {
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  if (($userPath -split ';') -notcontains $dir) {
-    # prepended: a stale copy elsewhere (an old pip install in Python\Scripts,
-    # say) must not keep winning over the fresh binary
-    [Environment]::SetEnvironmentVariable('Path', "$dir;$userPath", 'User')
+  $parts = @(($userPath -split ';') | Where-Object { $_ })
+  # always at the front, even when an earlier install appended it at the end:
+  # a stale copy elsewhere (an old pip install in Python\Scripts, say) must
+  # not keep winning over the fresh binary
+  $rest = @($parts | Where-Object { $_ -ne $dir })
+  [Environment]::SetEnvironmentVariable('Path', ((@($dir) + $rest) -join ';'), 'User')
+  if ($parts -notcontains $dir) {
     Write-Host "Added $dir to the front of your PATH - open a new terminal."
+  } elseif ($parts[0] -ne $dir) {
+    Write-Host "Moved $dir to the front of your PATH - open a new terminal."
   }
 }
 

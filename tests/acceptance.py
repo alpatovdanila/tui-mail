@@ -1427,6 +1427,148 @@ async def phase14():
         await pilot.press('y')
         await pilot.pause()
         assert isinstance(app.screen, MainScreen)
+
+        # error classification: 4xx greylisting retries, 5xx and partial delivery do not
+        assert not ob.permanent_error(smtplib.SMTPRecipientsRefused({'a@b': (450, b'later')}))
+        assert ob.permanent_error(smtplib.SMTPRecipientsRefused({'a@b': (550, b'no')}))
+        assert not ob.permanent_error(smtplib.SMTPSenderRefused(454, b'tmp', 'me@x'))
+        assert ob.permanent_error(be.PartialDelivery({'bob@x': (550, b'no such user')}))
+        assert not ob.permanent_error(ConnectionError('reset'))
+
+        class _FakeSMTP:  # the server accepts alice, refuses bob after DATA
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def login(self, *a):
+                pass
+
+            def send_message(self, msg):
+                return {'bob@typo.example': (550, b'5.1.1 no such user')}
+        orig_ssl = be.smtplib.SMTP_SSL
+        be.smtplib.SMTP_SSL = _FakeSMTP
+        try:
+            try:
+                be._smtp_send_once('h', 465, 'me@x', 'pw', be.build_message('me@x', 'a@ok, bob@typo.example', 's', 'b'))
+                assert False, 'partial refusal must not count as delivered'
+            except be.PartialDelivery as exc:
+                assert 'bob@typo.example' in str(exc) and 'did get it' in str(exc)
+        finally:
+            be.smtplib.SMTP_SSL = orig_ssl
+
+        # the sender re-checks holds after due(): a message deleted (or opened)
+        # while an earlier one is on the wire is not delivered
+        import threading as _th
+        gate = _th.Event()
+
+        def slow_then_real(msg):
+            gate.wait(5)
+            real_send(msg)
+        personal.send = slow_then_real
+        first = app.outbox.enqueue('personal', 'you@tuimail.demo', 'a@example.com', 'first', 'b')
+        second = app.outbox.enqueue('personal', 'you@tuimail.demo', 'b@example.com', 'second', 'b')
+        app.drain_outbox()
+        await wait_until(pilot, lambda: app.outbox.is_sending(first['id']))
+        app.outbox.hold(second['id'])  # what d / Enter do
+        gate.set()
+        await wait_until(pilot, lambda: not app.outbox.is_sending(first['id']))
+        await pilot.pause(0.4)
+        assert personal.outbox[-1]['Subject'] == 'first'
+        assert app.outbox.get(second['id']) is not None and app.outbox.get(second['id'])['tries'] == 0
+        app.outbox.release(second['id'])
+        app.drain_outbox()
+        await wait_until(pilot, lambda: not app.outbox.items())
+        assert personal.outbox[-1]['Subject'] == 'second'
+        personal.send = real_send
+
+        # another process holding the claim: not ours to send; a stale claim recovers
+        rec = app.outbox.enqueue('personal', 'you@tuimail.demo', 'c@example.com', 'claimed', 'b')
+        (spool / f'{rec["id"]}.json').rename(spool / f'{rec["id"]}.sending')
+        assert app.outbox.send(rec, app.session) is False
+        assert app.outbox.is_sending(rec['id']) and app.outbox.get(rec['id'])['_sending']
+        assert app.outbox.status(app.outbox.get(rec['id'])) == 'sending'
+        assert app.outbox.due({'personal'}, force=True) == []
+        app.outbox.recover()  # fresh claim: another live window owns it
+        assert (spool / f'{rec["id"]}.sending').exists()
+        os.utime(spool / f'{rec["id"]}.sending', (_t.time() - 3600, _t.time() - 3600))
+        app.outbox.recover()
+        got = app.outbox.get(rec['id'])
+        assert got and not got['_sending'] and got['tries'] == 1 and 'interrupted' in got['error']
+        assert app.outbox.remove(rec['id'])
+
+        # a tampered record cannot mail files from outside the spool
+        secret = Path(TMP) / 'secret.txt'
+        secret.write_text('hunter2', encoding='utf-8')
+        rec = app.outbox.enqueue('personal', 'you@tuimail.demo', 'd@example.com', 'tampered', 'b')
+        raw = json.loads((spool / f'{rec["id"]}.json').read_text('utf-8'))
+        raw['attachments'] = [str(secret)]
+        (spool / f'{rec["id"]}.json').write_text(json.dumps(raw), encoding='utf-8')
+        assert be.attachments_of(app.outbox.message(app.outbox.get(rec['id']), for_preview=True)) == []
+        try:
+            app.outbox.send(app.outbox.get(rec['id']), app.session)
+            assert False, 'must not send'
+        except PermissionError:
+            pass
+        assert personal.outbox[-1]['Subject'] != 'tampered'
+        assert app.outbox.get(rec['id'])['permanent']
+        assert app.outbox.remove(rec['id'])
+
+        # a record with the right keys but wrong types is ignored, not fatal
+        (spool / 'typed.json').write_text(json.dumps(dict(
+            id='typed', account='personal', address='x', to='y', subject='s', body='b',
+            in_reply_to='', attachments=[], markup=False, message_id='<m@x>',
+            created=1.0, tries='3', last_try=0.0, error='', permanent=False)), encoding='utf-8')
+        assert app.outbox.items() == []
+        (spool / 'typed.json').unlink()
+
+        # Outbox search is local; the palette entry retries; logout releases an edit
+        personal.send = refuse
+        await pilot.press('c')
+        await pilot.pause()
+        app.screen.query_one('#to', Input).value = 'find@example.com'
+        app.screen.query_one('#subject', Input).value = 'needle in the outbox'
+        await pilot.press('ctrl+s')
+        await wait_until(pilot, lambda: any(r['tries'] for r in app.outbox.items()))
+        await wait_until(pilot, lambda: len(main.view) == 1)
+        hits, fallback = app.session.search(be.OUTBOX, 'needle', None)
+        assert len(hits) == 1 and fallback == []
+        assert app.session.search(be.OUTBOX, 'haystack', None)[0] == set()
+        from tuimail.app import MailCommands
+        labels = dict(MailCommands(app.screen)._commands(main))
+        assert 'Retry sending the Outbox now' in labels
+        personal.send = real_send
+        labels['Retry sending the Outbox now']()
+        await wait_until(pilot, lambda: not app.outbox.items())
+        assert personal.outbox[-1]['Subject'] == 'needle in the outbox'
+
+        personal.send = refuse
+        await pilot.press('c')
+        await pilot.pause()
+        app.screen.query_one('#to', Input).value = 'edit@example.com'
+        app.screen.query_one('#subject', Input).value = 'left open'
+        await pilot.press('ctrl+s')
+        await wait_until(pilot, lambda: any(r['tries'] for r in app.outbox.items()))
+        await wait_until(pilot, lambda: len(main.view) == 1)
+        stuck = app.outbox.items()[0]['id']
+        table(app).focus()
+        await pilot.pause()
+        await pilot.press('enter')
+        await pilot.pause()
+        assert isinstance(app.screen, ComposeScreen) and stuck in app.outbox.held
+        await pilot.press('ctrl+l')
+        await settle(pilot)
+        assert isinstance(app.screen, LoginScreen) and stuck not in app.outbox.held
+        await demo_login(pilot)
+        main = app.screen
+        personal = app.session.account('personal').backend
+        app.drain_outbox(force=True)
+        await wait_until(pilot, lambda: not app.outbox.items())
+        assert personal.outbox[-1]['Subject'] == 'left open'
     print('phase 14 (outbox: queue, retry, edit, delete, persistence): ok')
 
 
