@@ -353,13 +353,27 @@ def markup_html(body) -> str | None:
     """Compose markup (**bold**, *italic*, [text](url)) -> an HTML alternative;
     None when the body carries no markup, keeping unformatted mail plain."""
     import html as _html
-    esc = _html.escape(body)
-    out = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', esc)
-    out = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', out)
-    out = re.sub(r'\[([^\]]+)\]\((https?://[^)\s]+)\)', r'<a href="\2">\1</a>', out)
-    if out == esc:
+
+    def fmt(line):
+        line = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', line)
+        line = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'<i>\1</i>', line)
+        # label may not contain brackets/newlines: keeps the regex linear on
+        # hostile input and unambiguous on nested markup
+        return re.sub(r'\[([^\[\]]+)\]\((https?://[^)\s]+)\)', r'<a href="\2">\1</a>', line)
+
+    changed = False
+    out = []
+    for raw in body.split('\n'):
+        esc = _html.escape(raw)
+        if raw.lstrip().startswith('>'):
+            out.append(esc)  # quoted text is the other party's — never re-marked
+            continue
+        rich = fmt(esc)
+        changed = changed or rich != esc
+        out.append(rich)
+    if not changed:
         return None
-    return '<html><body>' + out.replace('\n', '<br>\n') + '</body></html>'
+    return '<html><body>' + '<br>\n'.join(out) + '</body></html>'
 
 
 def build_message(sender, to, subject, body, in_reply_to=None,

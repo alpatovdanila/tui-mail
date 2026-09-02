@@ -566,6 +566,7 @@ class MainScreen(Screen):
         self._seq = 0  # bumped on every optimistic local change; stale loads are dropped
         table = self.query_one('#msgtable', DataTable)
         table.cursor_type = 'row'
+        table.cursor_background_priority = 'css'  # cursor stays visible over selection tint
         table.add_column(' ', width=2)
         table.add_column('From', width=26)
         table.add_column('Subject')
@@ -689,16 +690,26 @@ class MainScreen(Screen):
             self._set_preview(Text('Nothing here — the folder is empty or no matches.',
                                    style='dim'))
 
-    SEL_BG = ' on #2d3f76'
+    def _sel_bg(self):
+        """Selection tint derived from the active theme, so light themes stay
+        readable; falls back to a fixed dark blue."""
+        try:
+            from textual.color import Color
+            theme = self.app.current_theme
+            base = Color.parse(theme.surface or theme.background or '#1e2030')
+            return ' on ' + base.blend(Color.parse(theme.accent), 0.35).hex
+        except Exception:
+            return ' on #2d3f76'
 
     def rebuild_table(self, keep_cursor=False):
         table = self.query_one('#msgtable', DataTable)
         cur = table.cursor_row if keep_cursor else 0
         table.clear()
         session = self.app.session
+        sel_bg = self._sel_bg()
         for s in self.view:
             sel = (s.account, s.uid) in self.selected
-            bg = self.SEL_BG if sel else ''
+            bg = sel_bg if sel else ''
             style = ('bold' if s.unread else '') + bg
             # one circle, colored by account: filled = unread, hollow = read
             icons = Text.assemble(
@@ -801,26 +812,30 @@ class MainScreen(Screen):
             if name and name != self.folder:
                 self.goto_folder(name)
 
+    def _leave_view(self):
+        """Folder/scope is changing: drop search and selection. Selection keys are
+        (account, uid) and IMAP uids are only unique per folder — a surviving
+        selection could target unrelated mail in the next folder."""
+        self.filter_uids = None
+        self.selected.clear()
+        self.update_selection_ui()
+        inp = self.query_one('#search', Input)
+        inp.value = ''
+        inp.remove_class('visible')
+        self.query_one('#msgtable', DataTable).loading = True
+
     def set_scope(self, scope):
         if scope == self.scope:
             return
         self.scope = scope
         self.folder = 'INBOX'
-        self.filter_uids = None
-        inp = self.query_one('#search', Input)
-        inp.value = ''
-        inp.remove_class('visible')
+        self._leave_view()
         self.update_accounts()
-        self.query_one('#msgtable', DataTable).loading = True
         self._load_all(True)
 
     def goto_folder(self, name):
         self.folder = name
-        self.filter_uids = None
-        inp = self.query_one('#search', Input)
-        inp.value = ''
-        inp.remove_class('visible')
-        self.query_one('#msgtable', DataTable).loading = True
+        self._leave_view()
         self.update_sidebar()
         self._load_folder(name)
 
@@ -901,12 +916,21 @@ class MainScreen(Screen):
 
     # -- generic fire-and-forget backend IO with optimistic UI --
     @work(thread=True, group='io')
-    def _io(self, fn):
+    def _io(self, fn, reload=False):
         try:
             fn()
         except Exception as exc:
             self.app.call_from_thread(self.app.notify, str(exc),
                                       severity='error', title='Mail')
+        if reload:
+            self.app.call_from_thread(self._after_bulk)
+
+    def _after_bulk(self):
+        # a poll that read the mailbox mid-way through N server commands may
+        # have passed the seq guard with a half-applied snapshot — invalidate
+        # it and reconcile with the server now rather than at the next poll
+        self._seq += 1
+        self._load_all(False)
 
     # -- actions --
     def action_move(self, delta):
@@ -940,7 +964,7 @@ class MainScreen(Screen):
         def store():
             for account, uid in ops:
                 session.mark(account, folder, uid, read=not make_unread)
-        self._io(store)
+        self._io(store, reload=len(ops) > 1)
         self._adjust_unread(folder, len(changed) if make_unread else -len(changed))
         self.rebuild_table(keep_cursor=True)
 
@@ -961,7 +985,7 @@ class MainScreen(Screen):
         def store():
             for account, uid in ops:
                 session.flag(account, folder, uid, flagged=make_flagged)
-        self._io(store)
+        self._io(store, reload=len(ops) > 1)
         self.rebuild_table(keep_cursor=True)
 
     def action_delete(self):
@@ -991,7 +1015,7 @@ class MainScreen(Screen):
                     failed += 1
             if failed:
                 raise RuntimeError(f'{failed} of {len(ops)} deletions failed — refresh (R)')
-        self._io(rm)
+        self._io(rm, reload=True)
         unread_gone = 0
         for s in targets:
             if s in self.all_msgs:
@@ -1239,7 +1263,14 @@ class ComposeScreen(Screen[bool]):
         self.query_one('#body' if self.seed.get('to') else '#to').focus()
 
     # -- formatting & attachments --
+    def _body_focused(self):
+        # formatting keys are body-only; in To/Subject, Ctrl+E/K keep their
+        # stock readline meaning (end of line / delete to end)
+        return self.query_one('#body', TextArea).has_focus
+
     def _wrap(self, left, right):
+        if not self._body_focused():
+            return
         ta = self.query_one('#body', TextArea)
         sel = ta.selected_text
         if sel:
@@ -1257,6 +1288,8 @@ class ComposeScreen(Screen[bool]):
         self._wrap('*', '*')
 
     def action_fmt_link(self):
+        if not self._body_focused():
+            return
         ta = self.query_one('#body', TextArea)
         label = ta.selected_text or 'link text'
         start, end = sorted((ta.selection.start, ta.selection.end))

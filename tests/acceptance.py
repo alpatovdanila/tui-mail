@@ -190,6 +190,16 @@ def helpers():
     assert be.body_of(rich).strip().startswith('**bold**')  # plain part keeps markup text
     plain = be.build_message('a@b.c', 'x@y.z', 's', 'no markup here')
     assert plain.get_body(preferencelist=('html',)) is None
+    # quoted text belongs to the other party: never re-marked into OUR html
+    reply_body = '**mine**\n\n> *theirs* [phish](https://evil.example)\n> more'
+    h = be.markup_html(reply_body)
+    assert h and '<b>mine</b>' in h and '<i>theirs</i>' not in h
+    assert 'href' not in h and 'evil.example' in h  # url shown as text, not a link
+    # hostile bracket runs must not make the link regex quadratic
+    import time as _t
+    t0 = _t.time()
+    be.markup_html('[' * 50000 + '(https://x')
+    assert _t.time() - t0 < 1.5, 'markup_html link regex is backtracking'
 
     # attachments ride along with the right filename
     att = Path(TMP) / 'notes.txt'
@@ -740,6 +750,13 @@ async def phase9():
         await settle(pilot)
         assert table(app).row_count == n - 2
         assert not main.selected
+
+        # a selection never survives a folder switch (uids are folder-scoped)
+        await pilot.press('space')
+        assert main.selected
+        main.goto_folder('Sent')
+        await settle(pilot)
+        assert not main.selected and not main.query_one('#selbar').display
     print('phase 9 (selection mode): ok')
 
 
@@ -758,8 +775,12 @@ async def phase10():
         compose.query_one('#to', Input).value = 'x@y.z'
         compose.query_one('#subject', Input).value = 'formatted'
 
-        # formatting keys wrap / insert markers
+        # formatting keys only act inside the body: in To they leave it alone
         body = compose.query_one('#body', TextArea)
+        compose.query_one('#to', Input).focus()
+        await pilot.pause()
+        await pilot.press('ctrl+b', 'ctrl+k')
+        assert body.text == ''
         body.focus()
         await pilot.pause()
         await pilot.press('ctrl+b')

@@ -4,6 +4,25 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.9.2 — 2026-09-02
+
+### Security
+- Quoted text in a reply is never reinterpreted as your own markup: a
+  hostile sender can no longer plant live links or formatting into the HTML
+  part of your outgoing reply. The link pattern is also linear on hostile
+  bracket floods.
+
+### Fixed
+- **Selection is cleared when you switch folder or account.** IMAP uids are
+  only unique per folder, so a selection surviving the switch could bulk-
+  delete unrelated mail in the next folder.
+- Bulk delete/mark/star now reconcile with the server when they finish, so a
+  background refresh mid-operation can no longer resurrect removed rows.
+- Ctrl+B/E/K act only inside the body; in To/Subject they keep their normal
+  editing meaning instead of dumping markers into the message.
+- Selection tint follows the active theme (readable on light themes) and no
+  longer hides the cursor row inside a selected block.
+
 ## 1.9.1 — 2026-09-02
 
 ### Added
