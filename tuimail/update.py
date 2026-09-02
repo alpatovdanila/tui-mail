@@ -99,7 +99,13 @@ CLI_LINK = '/usr/local/bin/tuimail'
 
 
 def cli_installed() -> bool:
+    """True when `tuimail` on PATH (or the /usr/local/bin link) is this binary —
+    curl-installed copies in ~/.local/bin already count."""
+    import shutil
     try:
+        found = shutil.which('tuimail')
+        if found and os.path.realpath(found) == str(target_path()):
+            return True
         return os.path.realpath(CLI_LINK) == str(target_path())
     except OSError:
         return False

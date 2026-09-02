@@ -35,77 +35,52 @@ Python stdlib for everything mail.
   `Ctrl+U` downloads, verifies, swaps the binary, and restarts.
 - **Demo mailbox** — try the whole UI without an account.
 
-## Run
+## Install
+
+**macOS** — one line, no sudo, no Gatekeeper prompts (terminal downloads
+aren't quarantined). Verifies the release's sha256, installs to
+`~/.local/bin`, and puts `tuimail` on your PATH:
 
 ```bash
-pip install textual
-python -m tuimail
+curl -fsSL https://raw.githubusercontent.com/alpatovdanila/tui-mail/main/install.sh | sh
 ```
 
-First run shows the onboarding wizard. Settings live in `~/.tuimail.json`
-(next to the exe for the portable build). Password is only stored if you tick
-"remember password".
+**Windows** — same idea, into `%LOCALAPPDATA%\Programs\tuimail`:
 
-## Portable builds
-
-The binary is self-contained and reads/writes `tuimail.json` next to itself,
-so it runs from a USB stick. `tuimail --check` boots the app headless once and
-prints `ok`. PyInstaller cannot cross-compile — each OS builds its own binary.
-
-**Windows** (note the `;` in --add-data):
-
-```bash
-pip install pyinstaller
-pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss;tuimail" run.py
+```powershell
+irm https://raw.githubusercontent.com/alpatovdanila/tui-mail/main/install.ps1 | iex
 ```
 
-**macOS / Linux** (same command, `:` instead of `;`):
-
-```bash
-pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss:tuimail" run.py
-```
-
-**Installing on macOS**: grab `tuimail-macos.dmg` from the
-[latest release](https://github.com/alpatovdanila/tui-mail/releases/latest),
-open it and **drag tuimail into Applications** — the usual two-icon window.
-The app is not code-signed, so the first launch needs a right-click > Open
-(or System Settings → Privacy & Security → Open Anyway); after that it opens
-normally. Double-clicking the app opens iTerm (or Terminal) running tuimail.
-
-On first run the app offers to install the `tuimail` terminal command via the
-native admin dialog — the same pattern VS Code and iTerm2 use; it's also
-available any time from the Ctrl+P palette. Prefer doing it by hand? Link the
-app's binary:
-
-```bash
-sudo ln -sf /Applications/tuimail.app/Contents/MacOS/tuimail-bin /usr/local/bin/tuimail
-```
-
-or install the bare `tuimail-macos-universal` binary from the same release:
-
-```bash
-sudo install -m 755 tuimail-macos-universal /usr/local/bin/tuimail && sudo xattr -d com.apple.quarantine /usr/local/bin/tuimail
-```
-
-When the binary sits in a non-writable directory like `/usr/local/bin`,
-settings go to `~/.tuimail.json`; in a writable directory (USB stick), they
-stay next to the binary — portable mode.
-
-**Or install with Python** (any OS, no binary needed) — this also creates the
-`tuimail` command:
+**Any OS with Python** (also creates the `tuimail` command):
 
 ```bash
 pipx install git+https://github.com/alpatovdanila/tui-mail.git
 ```
 
-**Download instead of building**: grab the
-[latest versioned release](https://github.com/alpatovdanila/tui-mail/releases/latest)
-— Windows exe, macOS dmg installer, and a universal macOS binary (one file for
-Apple Silicon and Intel), built and smoke-tested by
-[CI](.github/workflows/build.yml). A new `vX.Y.Z` release (with notes from
-[CHANGELOG.md](CHANGELOG.md)) is cut automatically whenever the version in
-`pyproject.toml` bumps; a rolling `latest` prerelease tracks every push to
-`main` for the impatient.
+After installing, run `tuimail` — first run shows the onboarding wizard, and
+the app updates itself from then on (a toast announces new versions; `Ctrl+U`
+installs). Settings live in `~/.tuimail.json`; passwords are stored only if
+you tick "remember password".
+
+Manual downloads: every
+[release](https://github.com/alpatovdanila/tui-mail/releases/latest) carries
+the bare binaries with sha256 digests (a browser download on macOS is
+quarantined — clear it with `xattr -d com.apple.quarantine tuimail-macos-universal`).
+A new `vX.Y.Z` release is cut automatically whenever the version in
+`pyproject.toml` bumps, with notes from [CHANGELOG.md](CHANGELOG.md); a
+rolling `latest` prerelease tracks every push.
+
+## Portable builds
+
+The binary is self-contained; run it from a writable directory (USB stick)
+and it keeps `tuimail.json` next to itself — portable mode, which never
+stores passwords. `tuimail --check` boots the app headless once and prints
+`ok`. Build your own with PyInstaller (each OS builds its own binary; on
+Windows the `--add-data` separator is `;` instead of `:`):
+
+```bash
+pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss:tuimail" run.py
+```
 
 ## Keys
 

@@ -4,6 +4,20 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.7.0 — 2026-09-02
+
+### Added
+- **Terminal-first install**: `curl -fsSL …/install.sh | sh` on macOS and
+  `irm …/install.ps1 | iex` on Windows — sha256-verified, no sudo, no
+  Gatekeeper prompts, installs to a user directory where the in-app updater
+  can replace it. CI smoke-tests both installers on real runners.
+
+### Removed
+- The macOS dmg. A terminal app is installed from the terminal; the dmg's
+  app-bundle wrapper, icon, and Gatekeeper dance are gone with it. Existing
+  .app installs keep working and their settings were already migrated to
+  `~/.tuimail.json`.
+
 ## 1.6.1 — 2026-09-02
 
 ### Changed
