@@ -734,9 +734,7 @@ class MainScreen(Screen):
         yield Header(show_clock=True)
         with Horizontal(id='main-split'):
             with Vertical(id='sidebar'):
-                yield Label('ACCOUNTS', classes='sidebar-title')
                 yield ListView(id='accounts')
-                yield Label('MAILBOXES', classes='sidebar-title')
                 yield ListView(id='folders')
             with Vertical(id='content'):
                 yield Input(placeholder='Search this folder — Enter filters, Esc clears',
@@ -761,6 +759,8 @@ class MainScreen(Screen):
         self.per_account = {}  # {account: {folder: unread}}
         self._pending = []  # deletes inside their undo window: (summary, index, folder, timer)
         self._inflight = set()  # keys whose server delete is running — never re-listed
+        self.query_one('#accounts', ListView).border_title = 'Accounts'
+        self.query_one('#folders', ListView).border_title = 'Mailboxes'
         table = self.query_one('#msgtable', DataTable)
         table.cursor_type = 'row'
         table.cursor_background_priority = 'css'  # cursor stays visible over selection tint
@@ -874,6 +874,14 @@ class MainScreen(Screen):
         return self._cache[key]
 
     # -- rendering --
+    def _select_row(self, lv, idx):
+        """Highlight row idx once the freshly appended items are mounted —
+        appends are asynchronous, so setting index right away hits an empty list."""
+        def select():
+            lv.index = None  # the same value again would not re-apply the highlight
+            lv.index = idx
+        self.call_after_refresh(select)
+
     def update_accounts(self):
         lv = self.query_one('#accounts', ListView)
         lv.clear()
@@ -900,7 +908,7 @@ class MainScreen(Screen):
             lv.append(item)
             if value == self.scope:
                 idx = i
-        lv.index = idx
+        self._select_row(lv, idx)
 
     def update_sidebar(self):
         lv = self.query_one('#folders', ListView)
@@ -915,7 +923,7 @@ class MainScreen(Screen):
             lv.append(item)
             if name == self.folder:
                 idx = i
-        lv.index = idx
+        self._select_row(lv, idx)
 
     def apply_filter(self, keep_cursor=False):
         self.view = [s for s in self.all_msgs

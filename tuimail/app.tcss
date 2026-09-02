@@ -99,25 +99,31 @@ OnboardingScreen, AccountFormScreen, AccountsScreen, LoginScreen {
 }
 #sidebar {
     width: 26;
-    padding: 0 1;
+}
+/* two separate panels; the focused one lights up like the message list does */
+#accounts, #folders {
+    background: transparent;
     border: round $primary 40%;
+    border-title-color: $text-muted;
+    border-title-style: bold;
+    padding: 0 1;
 }
-#sidebar:focus-within {
+#accounts:focus, #folders:focus {
     border: round $accent;
+    border-title-color: $accent;
 }
-.sidebar-title {
-    color: $text-muted;
-    text-style: bold;
-    margin: 0 0 1 1;
+/* a tint instead of the stock bright bar: the cyan counts stay readable */
+#accounts > ListItem.-highlight, #folders > ListItem.-highlight {
+    background: $primary 25%;
+}
+#accounts:focus > ListItem.-highlight, #folders:focus > ListItem.-highlight {
+    background: $primary 50%;
 }
 #accounts {
-    background: transparent;
     height: auto;
-    max-height: 8;
-    margin-bottom: 1;
+    max-height: 10;
 }
 #folders {
-    background: transparent;
     height: 1fr;
 }
 #content {

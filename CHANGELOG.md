@@ -27,6 +27,13 @@ with these notes automatically.
   symlink and otherwise tells you which file to remove. `tuimail --version`
   shows which copy actually runs.
 
+### Changed
+- **Sidebar panels.** Accounts and Mailboxes are two separate bordered
+  panels, each titled in its frame; the focused one lights up in the accent
+  colour (border and title) exactly like the message list, and its current
+  row uses a softer tint that keeps the unread counts readable. The current
+  row is now always shown in both panels (it used to vanish after a rebuild).
+
 ### Removed
 - The old behaviour where a failed send silently dropped you back into the
   composer with a short toast.
