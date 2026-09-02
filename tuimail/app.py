@@ -1351,6 +1351,11 @@ class MailCommands(Provider):
             ('Keyboard reference', screen.action_help),
             ('Logout', self.app.action_logout),
         ]
+        if self.app.update_info:
+            commands.append((f'Install update {self.app.update_info["version"]}',
+                             self.app.action_update_app))
+        else:
+            commands.append(('Check for updates now', self.app.action_check_updates_now))
         if len(session.accounts) > 1:
             commands.append(('Show all accounts', partial(screen.set_scope, None)))
             commands += [(f'Switch to account: {a.name}', partial(screen.set_scope, a.name))
@@ -1410,6 +1415,15 @@ class TuiMail(App):
             self._notified_update = info['version']
             self.notify(f'tuimail {info["version"]} is available — Ctrl+U to update',
                         timeout=10)
+
+    def action_check_updates_now(self):
+        self.notify('Checking for updates …', timeout=3)
+        self._check_updates()
+        self.set_timer(6, self._report_check)
+
+    def _report_check(self):
+        if not self.update_info:
+            self.notify('You are on the newest version')
 
     def action_update_app(self):
         info = self.update_info

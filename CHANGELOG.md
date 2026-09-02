@@ -4,6 +4,12 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.9.1 — 2026-09-02
+
+### Added
+- Updates in the Ctrl+P palette: "Install update vX.Y.Z" when one is
+  pending, "Check for updates now" otherwise.
+
 ## 1.9.0 — 2026-09-02
 
 ### Added

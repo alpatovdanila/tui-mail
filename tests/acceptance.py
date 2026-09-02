@@ -679,15 +679,19 @@ async def phase8():
     up.check_latest = lambda timeout=10: {'version': 'v99.0.0', 'assets': {}}
     try:
         async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
+            await demo_login(pilot)
             app._check_updates()
             await settle(pilot)
             assert app.update_info and app.update_info['version'] == 'v99.0.0'
             # not frozen -> Ctrl+U explains the pip path instead of self-updating
             await pilot.press('ctrl+u')
             await pilot.pause()
-            from tuimail.app import ConfirmScreen
+            from tuimail.app import ConfirmScreen, MailCommands
             assert not isinstance(app.screen, ConfirmScreen)
+            # the pending update surfaces in the command palette
+            provider = MailCommands(app.screen)
+            labels = [str(h.match_display) async for h in provider.search('update')]
+            assert any('v99.0.0' in lab for lab in labels), labels
     finally:
         up.check_latest = orig
     print('phase 8 (update check): ok')
