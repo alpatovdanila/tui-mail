@@ -4,6 +4,35 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.3.0 — 2026-09-02
+
+Security release — a full adversarial audit of the client, every finding
+verified by reproduction and fixed:
+
+### Security
+- **TLS certificates and hostnames are now verified** on IMAP, SMTPS, and
+  STARTTLS connections. Python's stdlib defaults verify nothing, so previous
+  builds could be intercepted by a network man-in-the-middle; update.
+- Hostile messages can no longer inject terminal escape sequences (ANSI/OSC)
+  through any displayed field — subjects, senders, bodies, reader headers,
+  links, or reply prefills are sanitized at ingestion.
+- A crafted HTML mail full of unclosed script tags no longer freezes the UI
+  (quadratic scrub made linear).
+- Server-controlled folder names that could break out of IMAP quoting are
+  rejected instead of replayed into commands.
+- Outgoing mail no longer leaks the machine's hostname or LAN IP (Message-ID
+  domain pinned to the account; EHLO sends `localhost`).
+- Portable mode (settings next to the exe) never stores passwords — removable
+  and shared media have no reliable file protection; the login screen now
+  shows each account's IMAP host so a tampered portable config is visible.
+- The config file is created owner-only from the first byte on POSIX (no
+  chmod-after-write window).
+- CI release builds pin exact dependency versions.
+
+### Fixed
+- macOS Terminal: input/select/button borders no longer render as broken
+  dashes (block-glyph borders replaced with box-drawing ones).
+
 ## 1.2.1 — 2026-09-01
 
 ### Changed

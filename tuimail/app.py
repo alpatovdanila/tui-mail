@@ -335,8 +335,13 @@ class LoginScreen(Screen):
             yield Static(LOGO, id='logo')
             yield Static('mail, comfortably, in your terminal', classes='tagline')
             for i, a in enumerate(self._accounts):
-                yield Static(account_label(a.get('name', '?'), a.get('color', 'white'),
-                                           a.get('address', '')), classes='acct-row')
+                row = account_label(a.get('name', '?'), a.get('color', 'white'),
+                                    a.get('address', ''))
+                # always show where the password will be sent — makes a planted
+                # config with a hostile imap_host visible before sign-in
+                host = a.get('imap_host') or 'imap.' + a.get('address', '@?').rsplit('@', 1)[-1]
+                row.append(f'  →  {host}', 'dim')
+                yield Static(row, classes='acct-row')
                 if not a.get('password'):
                     yield Input(placeholder=f'Password for {a.get("address", "")}',
                                 password=True, id=f'pw-{i}')
@@ -416,8 +421,11 @@ class LoginScreen(Screen):
             self._status(Text('✗ no account could connect', style='bold red'))
             return
         if remember:
+            if be.portable_mode():
+                self.app.notify('Portable mode: passwords are never stored next to the exe',
+                                severity='warning')
             for a, pw, _ in good:
-                a['password'] = pw  # `a` is the dict inside cfg['accounts']
+                a['password'] = pw  # `a` is the dict inside cfg['accounts']; portable save strips it
             if not be.save_config(cfg):
                 self.app.notify('Could not write the settings file — passwords not saved',
                                 severity='warning')
@@ -908,11 +916,12 @@ class ReaderScreen(Screen):
     def on_mount(self):
         session = self.app.session
         t = Text()
-        t.append(f'{self.msg.get("Subject") or "(no subject)"}\n\n', style='bold')
+        t.append(f'{be.sanitize(self.msg.get("Subject") or "(no subject)", keep_newlines=False)}\n\n',
+                 style='bold')
         for label in ('From', 'To', 'Cc', 'Date'):
             v = self.msg.get(label)
             if v:
-                t.append(f'{label:>8}: {v}\n', style='dim')
+                t.append(f'{label:>8}: {be.sanitize(v, keep_newlines=False)}\n', style='dim')
         try:
             self.account_line = f'{self.summary.account} <{session.address(self.summary.account)}>'
             t.append(f'{"Account":>8}: ', style='dim')

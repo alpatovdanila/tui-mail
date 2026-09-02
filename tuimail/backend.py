@@ -18,6 +18,7 @@ import json
 import os
 import re
 import smtplib
+import ssl
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -89,12 +90,24 @@ def load_config() -> dict:
     return cfg
 
 
+def portable_mode() -> bool:
+    """Config rides next to the exe (USB stick / shared dir) — hostile ground."""
+    return (not os.environ.get('TUIMAIL_CONFIG')
+            and getattr(sys, 'frozen', False)
+            and config_path().parent == Path(sys.executable).parent)
+
+
 def save_config(cfg: dict) -> bool:
     try:
-        p = config_path()
-        p.write_text(json.dumps(cfg, indent=2), 'utf-8')
-        if os.name == 'posix':
-            p.chmod(0o600)
+        if portable_mode():
+            # removable/shared media has no reliable ACLs — never persist passwords there
+            cfg = dict(cfg)
+            cfg['accounts'] = [{k: v for k, v in a.items() if k != 'password'}
+                               for a in cfg.get('accounts', [])]
+        # owner-only from the first byte: no chmod-after-write window
+        fd = os.open(config_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(cfg, indent=2))
         return True
     except OSError:
         return False
@@ -116,15 +129,30 @@ class Summary:
     account: str = ''  # set by Session when listing
 
 
+# A hostile message must not smuggle terminal escape sequences onto the
+# screen: drop whole CSI/OSC sequences first, then every remaining C0 control
+# (minus \t \n), DEL, and C1 control byte
+_ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]'                 # CSI
+                   r'|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?'     # OSC, even unterminated
+                   r'|\x9b[0-?]*[ -/]*[@-~]')                 # C1 CSI
+_CTRL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]')
+
+
+def sanitize(s, keep_newlines=True) -> str:
+    s = _CTRL.sub('', _ANSI.sub('', str(s)))
+    return s if keep_newlines else s.replace('\n', ' ')
+
+
 def dec(s) -> str:
     """Decode an RFC2047 header for *display*, collapsing folds."""
     if not s:
         return ''
     s = str(s)
     try:
-        return ' '.join(str(email.header.make_header(email.header.decode_header(s))).split())
+        s = ' '.join(str(email.header.make_header(email.header.decode_header(s))).split())
     except Exception:
-        return s
+        pass
+    return sanitize(s, keep_newlines=False)
 
 
 def parse_date(d) -> datetime | None:
@@ -150,7 +178,7 @@ def nice_date(dt: datetime | None) -> str:
 def nice_from(raw) -> str:
     """Display name from a raw From header: parse first, decode after."""
     name, addr = email.utils.parseaddr(str(raw or ''))
-    return dec(name) or addr or dec(raw)
+    return dec(name) or sanitize(addr, keep_newlines=False) or dec(raw)
 
 
 def body_of(msg) -> str:
@@ -162,13 +190,15 @@ def body_of(msg) -> str:
     except Exception:
         text = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace')
     if part.get_content_type() == 'text/html':
-        text = re.sub(r'(?is)<(script|style)\b.*?</\1>', '', text)
+        # (?:</tag>|\Z): an unclosed hostile tag matches to end-of-string instead
+        # of forcing a quadratic rescan from every start position
+        text = re.sub(r'(?is)<(script|style)\b.*?(?:</\1\s*>|\Z)', '', text)
         text = re.sub(r'(?i)<br\s*/?>|</p>|</div>', '\n', text)
         import html as _html
         text = _html.unescape(re.sub(r'<[^>]+>', '', text))  # ponytail: naive HTML strip; html.parser if it matters
         text = re.sub(r'[ \t]+', ' ', text)
         text = re.sub(r'\n{3,}', '\n\n', text).strip()
-    return text
+    return sanitize(text)
 
 
 URL_RE = re.compile(r'https?://[^\s<>"\')\]]+')
@@ -185,7 +215,7 @@ def extract_links(msg) -> list[str]:
     seen: dict[str, None] = {}
     for t in texts:
         for u in URL_RE.findall(t):
-            seen.setdefault(u.rstrip('.,;:!?'))
+            seen.setdefault(sanitize(u, keep_newlines=False).rstrip('.,;:!?'))
     return list(seen)
 
 
@@ -193,7 +223,7 @@ def attachments_of(msg) -> list[tuple[str, bytes]]:
     out = []
     for part in msg.iter_attachments():
         name = os.path.basename(part.get_filename() or 'attachment.bin')
-        name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', name) or 'attachment.bin'
+        name = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f-\x9f]', '_', name) or 'attachment.bin'
         try:
             data = part.get_payload(decode=True) or b''
         except Exception:
@@ -213,11 +243,13 @@ def reply_seed(msg) -> dict:
         pass
     if not addr:  # malformed header: parse the raw-ish string, never the decoded one
         addr = email.utils.parseaddr(str(frm or ''))[1]
-    subject = str(msg.get('Subject') or '')
+    subject = sanitize(str(msg.get('Subject') or ''), keep_newlines=False)
     if not subject.lower().startswith('re:'):
         subject = 'Re: ' + subject
+    addr = sanitize(addr, keep_newlines=False)
+    date = sanitize(str(msg.get('Date') or 'an earlier date'), keep_newlines=False)
     quoted = '\n'.join('> ' + ln for ln in body_of(msg).splitlines())
-    body = f'\n\nOn {msg.get("Date", "an earlier date")}, {addr or "they"} wrote:\n{quoted}\n'
+    body = f'\n\nOn {date}, {addr or "they"} wrote:\n{quoted}\n'
     mid = str(msg.get('Message-ID') or '')
     return {'to': addr, 'subject': subject, 'body': body,
             'in_reply_to': ' '.join(mid.split())}
@@ -227,7 +259,10 @@ def build_message(sender, to, subject, body, in_reply_to=None) -> EmailMessage:
     m = EmailMessage()
     m['From'], m['To'], m['Subject'] = sender, to, subject
     m['Date'] = email.utils.formatdate(localtime=True)
-    m['Message-ID'] = email.utils.make_msgid()
+    # pin the msgid domain to the sender's — the default embeds the local
+    # machine's hostname in every outgoing mail
+    m['Message-ID'] = email.utils.make_msgid(
+        domain=sender.rsplit('@', 1)[-1] if '@' in sender else None)
     if in_reply_to:
         m['In-Reply-To'] = m['References'] = ' '.join(in_reply_to.split())
     m.set_content(body)
@@ -272,10 +307,16 @@ def parse_fetch_headers(resp) -> list[Summary]:
 def smtp_send(smtp_host, address, password, msg) -> None:
     host, _, port = smtp_host.partition(':')
     port = int(port or 465)
-    cls = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
-    with cls(host, port, timeout=20) as s:
+    tls = ssl.create_default_context()  # stdlib default skips verification
+    # local_hostname: the default EHLO leaks the machine's hostname or LAN IP
+    if port == 465:
+        server = smtplib.SMTP_SSL(host, port, timeout=20, context=tls,
+                                  local_hostname='localhost')
+    else:
+        server = smtplib.SMTP(host, port, timeout=20, local_hostname='localhost')
+    with server as s:
         if port != 465:
-            s.starttls()
+            s.starttls(context=tls)
         s.login(address, password)
         s.send_message(msg)
 
@@ -294,7 +335,10 @@ class ImapBackend:
 
     def _connect(self):
         host, _, port = self._imap_host.partition(':')
-        self._conn = imaplib.IMAP4_SSL(host, int(port or 993), timeout=15)
+        # stdlib default context does NOT verify certificates — a MITM could
+        # harvest the password; always verify cert + hostname
+        self._conn = imaplib.IMAP4_SSL(host, int(port or 993), timeout=15,
+                                       ssl_context=ssl.create_default_context())
         self._conn.login(self.address, self._pw)
         self._selected = None
 
@@ -308,6 +352,8 @@ class ImapBackend:
 
     def _select(self, folder):
         if self._selected != folder:
+            if re.search(r'["\r\n]', folder):
+                raise RuntimeError('unsafe folder name')  # our quoting cannot round-trip it
             self._selected = None  # a failed SELECT leaves the connection unselected
             typ, _ = self._conn.select(f'"{folder}"')
             if typ != 'OK':
@@ -327,7 +373,10 @@ class ImapBackend:
                 name = m.group(1).strip()
                 if name.startswith(b'"') and name.endswith(b'"'):
                     name = name[1:-1]
-                names.append(name.decode('ascii', 'replace'))  # ponytail: modified-UTF7 folder names shown raw
+                decoded = name.decode('ascii', 'replace')  # ponytail: modified-UTF7 folder names shown raw
+                if re.search(r'["\r\n]', decoded):
+                    continue  # server-controlled name that could break out of our IMAP quoting
+                names.append(decoded)
             names.sort(key=lambda n: (n.upper() != 'INBOX', n.upper()))
             out = []
             for name in names[:30]:
@@ -394,7 +443,7 @@ class ImapBackend:
             return None
         def go():
             self._select(folder)
-            q = query.replace('\\', '').replace('"', '')
+            q = re.sub(r'[\\"\r\n]', ' ', query)  # no quoting or CRLF into the IMAP command
             typ, d = self._conn.uid('search', None, 'TEXT', f'"{q}"')
             return {u.decode() for u in (d[0] or b'').split()}
         try:

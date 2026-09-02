@@ -2,8 +2,21 @@
 Screen {
     background: $background;
 }
+/* Textual's default tall/line borders use block-element glyphs that macOS
+   Terminal draws with gaps (broken dashed look) — use box-drawing borders */
+Input, TextArea, SelectCurrent, Checkbox {
+    border: round $primary 40%;
+}
+Input:focus, TextArea:focus, Checkbox:focus, Select:focus SelectCurrent {
+    border: round $accent;
+}
 Button {
     margin: 1 2 0 0;
+    border: round $primary 40% !important;  /* variants re-declare tall borders */
+}
+Button:focus {
+    border: round $accent !important;
+    text-style: bold;
 }
 .hint {
     color: $text-muted;

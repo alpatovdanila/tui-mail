@@ -118,6 +118,25 @@ Apple Silicon and Intel), built and smoke-tested by
 | Compose | `Ctrl+S` / `Esc` | send / cancel |
 | Anywhere| `Ctrl+P` / `Ctrl+L` / `?` | palette / logout / help |
 
+## Security
+
+Audited adversarially (every finding verified by reproduction, fixed, and
+regression-tested in the acceptance suite):
+
+- TLS with **certificate and hostname verification** on IMAP, SMTPS, and
+  STARTTLS (Python's stdlib verifies nothing by default).
+- All message-derived text (headers, bodies, links, reply prefills) is
+  **sanitized against terminal escape injection** before it reaches the screen.
+- Passwords are stored only with explicit opt-in, plain text by design,
+  owner-only file permissions on POSIX — and **never in portable mode**
+  (settings next to the exe on removable/shared media).
+- Outgoing mail does not leak your hostname or LAN IP (Message-ID and EHLO).
+- The login screen always shows which server each password will be sent to.
+- Nothing is sent anywhere except your own configured mail servers.
+
+Known accepted risks: binaries are unsigned (macOS Gatekeeper warns once);
+GitHub Actions are pinned by major version, not commit SHA.
+
 ## Development
 
 ```bash

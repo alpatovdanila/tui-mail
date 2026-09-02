@@ -79,6 +79,81 @@ def helpers():
     assert a['password'] == 'pw' and a['color'] == be.DEFAULT_COLORS[0]
     be.config_path().unlink()
 
+    # security: hostile control chars (ESC/CSI/C1) never reach the terminal
+    evil = 'x\x1b]0;pwn\x07\x1b[31m\x9cy'
+    assert be.sanitize(evil) == 'xy'
+    assert be.dec('inv\x1boice') == 'invoice'
+    assert be.nice_from('e\x1bvil <a\x1b@b.c>') in ('evil', 'a@b.c', 'evil <a@b.c>')
+    hostile = email.message_from_bytes(
+        b'Content-Type: text/plain\r\n\r\nhi \x1b]52;c;evil\x07 https://x.y/\x1b[2Jz\r\n',
+        policy=email.policy.default)
+    assert '\x1b' not in be.body_of(hostile)
+    assert all('\x1b' not in u for u in be.extract_links(hostile))
+
+    # security: reply prefill can't smuggle escapes via Date or the sender addr
+    raw = (b'From: att\x1backer <x@y.z>\r\n'
+           b'Date: Mon\x1b]0;pwn\x07, 01 Sep 2025 10:00:00 +0000\r\n'
+           b'Subject: s\r\nMessage-ID: <m@x>\r\n\r\nbody\r\n')
+    seed = be.reply_seed(email.message_from_bytes(raw, policy=email.policy.default))
+    assert '\x1b' not in seed['body'] and '\x1b' not in seed['to'] and 'pwn' not in seed['body']
+
+    # security: a bomb of unclosed <script tags must not freeze the HTML scrub
+    import time
+    bomb = email.message_from_bytes(
+        b'Content-Type: text/html\r\n\r\n' + b'<script ' * 20000,
+        policy=email.policy.default)
+    t0 = time.time()
+    be.body_of(bomb)
+    assert time.time() - t0 < 3, 'HTML scrub is quadratic again'
+
+    # security: portable mode (config next to the exe) never persists passwords
+    import sys as _sys
+    import tempfile as _tf
+    saved_env = os.environ.pop('TUIMAIL_CONFIG')
+    pdir = Path(_tf.mkdtemp(prefix='tuimail-portable-'))
+    (pdir / 'tuimail.json').write_text('{}', encoding='utf-8')
+    orig_exe = _sys.executable
+    _sys.frozen = True
+    _sys.executable = str(pdir / 'tuimail.exe')
+    try:
+        assert be.portable_mode()
+        assert be.save_config({'accounts': [
+            {'name': 'a', 'address': 'a@b.c', 'password': 'sekret'}]})
+        data = (pdir / 'tuimail.json').read_text(encoding='utf-8')
+        assert 'sekret' not in data and 'a@b.c' in data
+    finally:
+        del _sys.frozen
+        _sys.executable = orig_exe
+        os.environ['TUIMAIL_CONFIG'] = saved_env
+
+    # security: outgoing Message-ID must not leak the local hostname
+    msg = be.build_message('me@example.org', 'you@x.y', 's', 'b')
+    assert str(msg['Message-ID']).endswith('@example.org>')
+
+    # security: IMAP connections must verify certificates and hostnames
+    import ssl as _ssl
+    captured = {}
+
+    class _Boom(Exception):
+        pass
+
+    class _FakeImap:
+        def __init__(self, host, port, timeout=None, ssl_context=None):
+            captured['ctx'] = ssl_context
+            raise _Boom
+
+    orig = be.imaplib.IMAP4_SSL
+    be.imaplib.IMAP4_SSL = _FakeImap
+    try:
+        try:
+            be.ImapBackend('a@b.c', 'pw', 'imap.b.c', 'smtp.b.c')
+        except _Boom:
+            pass
+    finally:
+        be.imaplib.IMAP4_SSL = orig
+    ctx = captured['ctx']
+    assert ctx is not None and ctx.verify_mode == _ssl.CERT_REQUIRED and ctx.check_hostname
+
     # regression: duplicate account names are uniquified (the name routes every op)
     s = be.Session([be.Account('john', 'red', be.DemoBackend('a@x', 'home')),
                     be.Account('john', 'blue', be.DemoBackend('b@x', 'work'))])
