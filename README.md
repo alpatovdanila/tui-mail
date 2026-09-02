@@ -69,7 +69,8 @@ pipx install git+https://github.com/alpatovdanila/tui-mail.git
 After installing, run `tuimail` — first run shows the onboarding wizard, and
 the app updates itself from then on (a toast announces new versions; `Ctrl+U`
 installs). Settings live in `~/.tuimail.json`; passwords are stored only if
-you tick "remember password".
+you tick "remember password". Outgoing mail is spooled in `~/.tuimail.outbox/`
+(owner-only files) until the server has accepted it — see Outbox below.
 
 Manual downloads: every
 [release](https://github.com/alpatovdanila/tui-mail/releases/latest) carries
@@ -82,9 +83,9 @@ rolling `latest` prerelease tracks every push.
 ## Portable builds
 
 The binary is self-contained; run it from a writable directory (USB stick)
-and it keeps `tuimail.json` next to itself — portable mode, which never
-stores passwords. `tuimail --check` boots the app headless once and prints
-`ok`. Build your own with PyInstaller (each OS builds its own binary; on
+and it keeps `tuimail.json` (and the `tuimail.outbox/` spool) next to itself —
+portable mode, which never stores passwords. `tuimail --version` prints the
+version; `tuimail --check` boots the app headless once and prints `ok`. Build your own with PyInstaller (each OS builds its own binary; on
 Windows the `--add-data` separator is `;` instead of `:`):
 
 ```bash
@@ -110,8 +111,9 @@ pyinstaller --onefile --console --name tuimail --collect-all textual --add-data 
 | Reader  | `n` / `p` | next / previous message |
 | Reader  | `u` `s` `m` `d` | unread / star / move / delete |
 | Reader  | `o` / `a` | links / attachments |
-| Compose | `Ctrl+S` / `Esc` | send / cancel |
+| Compose | `Ctrl+S` / `Esc` | send (queues to the Outbox, closes at once) / cancel |
 | Compose | `Ctrl+B` `Ctrl+E` `Ctrl+K` / `Ctrl+O` | bold, italic, link / attach |
+| Outbox  | `Enter` / `R` / `d` | edit an unsent message / retry now / delete |
 | Anywhere| `Ctrl+P` / `Ctrl+L` / `?` `F1` | palette / logout / help |
 | Anywhere| `q` / `Ctrl+Q` | quit from the mailbox (asks) / quit now |
 

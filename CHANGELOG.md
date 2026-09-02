@@ -4,6 +4,27 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.13.0 — 2026-09-02
+
+### Added
+- **Outbox.** `Ctrl+S` no longer waits for the SMTP server: the message is
+  written to a local outgoing spool (`~/.tuimail.outbox/`, next to the exe in
+  portable mode; owner-only files) and the composer closes at once. A
+  background sender delivers it and toasts "Sent to …". If sending fails the
+  message stays in the new **Outbox** folder (right under INBOX in the
+  sidebar, with a count) with the server's error shown in the preview.
+  Transient failures (connection resets, timeouts, 4xx) retry automatically
+  with backoff; refused recipients, bad credentials, 5xx replies and missing
+  attachments wait for you. In the Outbox, `Enter` reopens the message in the
+  composer (resending keeps its Message-ID), `R` retries everything now, `d`
+  deletes (with the usual undo). Mail still queued when you quit goes out at
+  the next start.
+- `tuimail --version`.
+
+### Removed
+- The old behaviour where a failed send silently dropped you back into the
+  composer with a short toast.
+
 ## 1.12.1 — 2026-09-02
 
 An adversarial review of the 1.10/1.11 work; twelve confirmed findings, all fixed.

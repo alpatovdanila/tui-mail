@@ -21,6 +21,7 @@ from textual.widgets import (Button, Checkbox, DataTable, DirectoryTree,
 
 from . import __version__
 from . import backend as be
+from . import outbox as ob
 from . import update as up
 from .backend import nice_date
 
@@ -59,6 +60,9 @@ HELP_ROWS = [
     ('Ctrl+S / Esc', 'send / cancel'),
     ('Ctrl+B  Ctrl+E  Ctrl+K', 'bold, italic, link'),
     ('Ctrl+O', 'attach a file (Tab completes paths)'),
+    ('', ''),
+    ('Outbox', 'unsent mail waits here, retried automatically'),
+    ('Enter / R / d', 'edit unsent · retry now · delete'),
     ('', ''),
     ('Reader', ''),
     ('j k Space b', 'scroll / page down / page up'),
@@ -768,8 +772,11 @@ class MainScreen(Screen):
                               else f'{len(accts)} accounts')
         self.update_accounts()
         self._apply_layout()
+        self.app.session.outbox = self.app.outbox  # the Outbox folder is local
         self.set_interval(60, partial(self._load_all, False))  # quiet background poll
+        self.set_interval(60, self.app.drain_outbox)  # retries with backoff
         self._load_all(True)
+        self.app.drain_outbox()  # mail queued in an earlier run goes out now
         self.app.maybe_offer_cli()
 
     # -- responsive layout --
@@ -836,6 +843,7 @@ class MainScreen(Screen):
             self.folder = folder  # the scope had no such folder; INBOX it is
         table.loading = False
         self.folder_counts = counts
+        self._outbox_count()  # the sender may have emptied the spool since the snapshot
         self.per_account = per_account
         self._cache.clear()
         hidden = {(s.account, s.uid) for s, _, _, _ in self._pending} | set(self._inflight)
@@ -947,7 +955,8 @@ class MainScreen(Screen):
                 cur_key = None
         table.clear(columns=True)
         frm_w, subj_w, when_w = self._column_widths()
-        sent_like = 'sent' in be.decode_folder(self.folder).lower()
+        sent_like = (self.folder == be.OUTBOX
+                     or 'sent' in be.decode_folder(self.folder).lower())
         table.add_column(' ', width=2)
         table.add_column('To' if sent_like else 'From', width=frm_w)
         table.add_column('Subject', width=subj_w)
@@ -1091,6 +1100,14 @@ class MainScreen(Screen):
             return
         t = Text()
         t.append(f'{s.subject}\n', style='bold')
+        if folder == be.OUTBOX:
+            rec = app.outbox.get(s.uid)
+            if rec is not None:
+                signed_in = {a.name for a in app.session.accounts}
+                failed = app.outbox.status(rec, signed_in) == 'failed'
+                t.append(f'To {rec["to"]}\n', style='dim')
+                t.append(app.outbox.describe(rec, signed_in) + '\n',
+                         style='bold yellow' if failed else 'italic cyan')
         t.append(f'{s.sender} · {nice_date(s.date)}  ', style='dim')
         t.append('● ', style=app.session.color(s.account))
         t.append(f'{s.account}\n\n', style='dim')
@@ -1145,7 +1162,9 @@ class MainScreen(Screen):
             self.action_toggle_select()
             return
         s = self.current()
-        if s:
+        if s and self.folder == be.OUTBOX:
+            self._edit_outbox(s)  # an unsent message opens in the composer
+        elif s:
             self._open(s, self.folder)
 
     @work(thread=True, exclusive=True, group='open')
@@ -1191,7 +1210,9 @@ class MainScreen(Screen):
             self.app.notify('Replying needs a single message — Esc to leave selection')
             return
         s = self.current()
-        if s:
+        if s and self.folder == be.OUTBOX:
+            self._edit_outbox(s)
+        elif s:
             self._reply(s, self.folder)
 
     @work(thread=True, exclusive=True, group='open')
@@ -1249,6 +1270,70 @@ class MainScreen(Screen):
         account = self.scope or (s.account if s else None)
         self.app.push_screen(ComposeScreen({'account': account}))
 
+    # -- outbox (local spool of unsent mail) --
+    def _outbox_noop(self):
+        """Mailbox verbs that make no sense on queued mail."""
+        if self.folder != be.OUTBOX:
+            return False
+        self.app.notify('Outbox: Enter edits, R retries, d deletes')
+        return True
+
+    def _edit_outbox(self, s):
+        """Reopen an unsent message in the composer; Ctrl+S there re-queues it."""
+        outbox = self.app.outbox
+        rec = outbox.get(s.uid)
+        if rec is None:
+            self.app.notify('That message has already left the Outbox')
+            self._outbox_changed()
+            return
+        if s.uid in outbox.sending:
+            self.app.notify('This message is being sent right now')
+            return
+        outbox.hold(s.uid)  # the sender must not deliver it while it is being edited
+        seed = {'account': rec['account'], 'to': rec['to'], 'subject': rec['subject'],
+                'body': rec['body'], 'in_reply_to': rec['in_reply_to'],
+                'attachments': rec['attachments'], 'markup': rec['markup'],
+                'message_id': rec['message_id'], 'outbox_id': rec['id']}
+        self.app.push_screen(ComposeScreen(seed),
+                             lambda _sent: self._outbox_released(rec['id']))
+
+    def _outbox_released(self, id):
+        self.app.outbox.release(id)
+        self.app.drain_outbox()
+        self._outbox_changed()
+
+    def _outbox_count(self):
+        """Fresh spool count into folder_counts (the local list is instant)."""
+        session = self.app.session
+        if session is None or session.outbox is None:
+            return None
+        try:
+            queued = session.list_messages(be.OUTBOX, self.scope)
+        except Exception:
+            return None
+        self.folder_counts = [(n, len(queued) if n == be.OUTBOX else c)
+                              for n, c in self.folder_counts]
+        return queued
+
+    def _outbox_changed(self):
+        """The spool changed (queued, sent, failed, deleted): refresh the
+        sidebar count and, when it is on screen, the list itself."""
+        queued = self._outbox_count()
+        if queued is None:
+            return
+        self.update_sidebar()
+        if self.folder != be.OUTBOX:
+            return
+        hidden = {(p.account, p.uid) for p, _, _, _ in self._pending} | set(self._inflight)
+        self._seq += 1
+        self._cache.clear()
+        self.all_msgs = [m for m in queued if (m.account, m.uid) not in hidden]
+        self._preview_key = None  # the status line changed — re-render the preview
+        self.apply_filter(keep_cursor=True)
+        s = self.current()
+        if s is not None:
+            self._load_preview(s, be.OUTBOX)
+
     def _live(self, s):
         """The list's own object for a summary (the reader may hold a stale one
         from before a poll); identity is (account, uid), not dataclass equality."""
@@ -1257,6 +1342,8 @@ class MainScreen(Screen):
 
     def action_toggle_read(self, force=False, target=None):
         if not force and not self._table_focused():
+            return
+        if self._outbox_noop():
             return
         if target is not None:
             targets = [self._live(target) or target]
@@ -1283,6 +1370,8 @@ class MainScreen(Screen):
 
     def action_toggle_flag(self, force=False, target=None):
         if not force and not self._table_focused():
+            return
+        if self._outbox_noop():
             return
         if target is not None:
             targets = [self._live(target) or target]
@@ -1326,8 +1415,10 @@ class MainScreen(Screen):
     def action_move_to(self, force=False):
         if not force and not self._table_focused():
             return
+        if self._outbox_noop():
+            return
         targets = self._targets()
-        names = [n for n, _ in self.folder_counts if n != self.folder]
+        names = [n for n, _ in self.folder_counts if n not in (self.folder, be.OUTBOX)]
         if not targets or not names:
             return
         self.app.push_screen(FolderPickScreen(names),
@@ -1335,6 +1426,8 @@ class MainScreen(Screen):
 
     def action_archive(self, force=False):
         if not force and not self._table_focused():
+            return
+        if self._outbox_noop():
             return
         targets = self._targets()
         if targets:
@@ -1385,6 +1478,8 @@ class MainScreen(Screen):
 
     # -- load older --
     def action_load_older(self):
+        if self._outbox_noop():
+            return
         mins = {}
         # a message inside its undo window is still on the server: count it,
         # or the next page would hand it straight back
@@ -1483,7 +1578,7 @@ class MainScreen(Screen):
                 session.delete(s.account, folder, s.uid)
             finally:
                 self._inflight.discard(key)
-        self._io(go)
+        self._io(go, reload=folder == be.OUTBOX)  # the Outbox count lives in folder_counts
 
     def _commit_delete(self, s):
         for item in list(self._pending):
@@ -1526,6 +1621,8 @@ class MainScreen(Screen):
     def action_refresh(self):
         self.query_one('#msgtable', DataTable).loading = True
         self._load_all(True)
+        # in the Outbox, R also retries messages that had failed for good
+        self.app.drain_outbox(force=self.folder == be.OUTBOX)
 
     def action_help(self):
         self.app.push_screen(HelpScreen())
@@ -1703,7 +1800,7 @@ class ReaderScreen(Screen):
 
     def action_move(self):
         main = self.main
-        names = [n for n, _ in main.folder_counts if n != main.folder]
+        names = [n for n, _ in main.folder_counts if n not in (main.folder, be.OUTBOX)]
 
         def done(dest):
             if dest:
@@ -1775,17 +1872,22 @@ class ComposeScreen(Screen[bool]):
     def __init__(self, seed=None):
         super().__init__()
         self.seed = seed or {}
-        self._sending = False
-        self._used_markup = False
-        self.attachments = []
+        self._used_markup = bool(self.seed.get('markup'))
+        self.attachments = [Path(p) for p in self.seed.get('attachments', [])]
 
     def compose(self):
         session = self.app.session
         options = [(account_label(a.name, a.color, a.backend.address), a.name)
                    for a in session.accounts]
         self._initial_from = self.seed.get('account') or session.accounts[0].name
-        title = (f'✉  Reply to {self.seed["reply_to"]}' if self.seed.get('reply_to')
-                 else '✉  New message')
+        if self._initial_from not in {a.name for a in session.accounts}:
+            self._initial_from = session.accounts[0].name  # queued for an account since removed
+        if self.seed.get('outbox_id'):
+            title = '✉  Edit unsent message'
+        elif self.seed.get('reply_to'):
+            title = f'✉  Reply to {self.seed["reply_to"]}'
+        else:
+            title = '✉  New message'
         with Vertical():
             yield Label(Text(title), classes='card-title')  # sender names are not markup
             with Horizontal(id='from-row'):
@@ -1801,6 +1903,8 @@ class ComposeScreen(Screen[bool]):
         self.query_one('#to', Input).value = self.seed.get('to', '')
         self.query_one('#subject', Input).value = self.seed.get('subject', '')
         self.query_one('#body', TextArea).text = self.seed.get('body', '')
+        if self.attachments:
+            self._update_attach_line()
         self.query_one('#body' if self.seed.get('to') else '#to').focus()
 
     def action_help(self):
@@ -1865,8 +1969,6 @@ class ComposeScreen(Screen[bool]):
         line.display = bool(self.attachments)
 
     def action_send(self):
-        if self._sending:
-            return  # SMTP thread can't be aborted; a second Ctrl+S would send twice
         account = self.query_one('#from', Select).value
         to = self.query_one('#to', Input).value.strip()
         subject = self.query_one('#subject', Input).value.strip()
@@ -1874,35 +1976,31 @@ class ComposeScreen(Screen[bool]):
         if not to:
             self.app.notify('Add a recipient first', severity='warning')
             return
-        self._sending = True
-        self.app.notify(f'Sending from {account} to {to} …', timeout=3)
-        self._send(account, to, subject, body)
-
-    @work(thread=True, exclusive=True, group='send')
-    def _send(self, account, to, subject, body):
-        app = self.app
-        try:
-            msg = be.build_message(app.session.address(account), to, subject, body,
-                                   self.seed.get('in_reply_to'),
-                                   attachments=self.attachments,
-                                   markup=self._used_markup)
-            app.session.send(account, msg)
-        except Exception as exc:
-            app.call_from_thread(self._send_failed, exc)
+        missing = [p.name for p in self.attachments if not p.is_file()]
+        if missing:
+            self.app.notify(escape(f'Attachment missing: {", ".join(missing)}'),
+                            severity='error', timeout=8)
             return
-        app.call_from_thread(self._sent, account, to)
-
-    def _send_failed(self, exc):
-        # the draft stays open — nothing typed is lost on a failed send
-        self._sending = False
-        self.app.notify(f'Send failed, draft kept: {be.err_text(exc)}',
-                        severity='error', timeout=8)
-
-    def _sent(self, account, to):
-        self._sending = False
-        self.app.notify(escape(f'Sent from {account} to {to}'))
-        if self.app.screen is self:
+        app, outbox = self.app, self.app.outbox
+        old = self.seed.get('outbox_id')
+        if old and old in outbox.sending:
+            app.notify('This message is being sent right now — nothing to change')
+            return
+        if old:
+            outbox.remove(old)
+        # queued locally first: the composer closes at once and the sender
+        # thread delivers in the background; a failure lands in the Outbox
+        outbox.enqueue(account, app.session.address(account), to, subject, body,
+                       in_reply_to=self.seed.get('in_reply_to') or '',
+                       attachments=self.attachments, markup=self._used_markup,
+                       message_id=self.seed.get('message_id') or '')
+        app.notify(escape(f'Sending to {to} — the Outbox keeps it if that fails'), timeout=3)
+        if app.screen is self:
             self.dismiss(True)  # dismiss pops the CURRENT screen — only pop ourselves
+        main = app._main_screen()
+        if main is not None:
+            main._outbox_changed()
+        app.drain_outbox()
 
     def action_cancel(self):
         sel = self.query_one('#from', Select)
@@ -1913,7 +2011,8 @@ class ComposeScreen(Screen[bool]):
         subject = self.query_one('#subject', Input).value
         body = self.query_one('#body', TextArea).text
         dirty = (to != self.seed.get('to', '') or subject != self.seed.get('subject', '')
-                 or body != self.seed.get('body', '') or bool(self.attachments)
+                 or body != self.seed.get('body', '')
+                 or [str(p) for p in self.attachments] != list(self.seed.get('attachments', []))
                  or sel.value != self._initial_from)
         if not dirty:
             self.dismiss(False)
@@ -1950,6 +2049,7 @@ class MailCommands(Provider):
             ('Archive', partial(screen.action_archive, True)),
             ('Load older messages', screen.action_load_older),
             ('Refresh mailbox', screen.action_refresh),
+            ('Retry sending the Outbox now', partial(self.app.drain_outbox, True)),
             ('Search messages', screen.action_search),
             ('Keyboard reference', screen.action_help),
             ('Logout', self.app.action_logout),
@@ -1985,6 +2085,7 @@ class TuiMail(App):
     ]
 
     session = None
+    outbox = None  # tuimail.outbox.Outbox — the local spool behind the Outbox folder
     auto_login = True
     update_info = None
     restart_after_exit = False
@@ -1997,6 +2098,9 @@ class TuiMail(App):
             self.theme = 'tokyo-night'
         except Exception:
             pass  # older/newer theme sets — default theme is fine
+        self.outbox = ob.Outbox()
+        self._outbox_kick, self._outbox_force = threading.Event(), False
+        threading.Thread(target=self._outbox_loop, daemon=True, name='outbox').start()
         if (be.load_config().get('update_check', True)
                 and not os.environ.get('TUIMAIL_NO_UPDATE_CHECK')):
             self.set_interval(up.CHECK_EVERY, self._check_updates)
@@ -2011,6 +2115,50 @@ class TuiMail(App):
             self.pop_screen()
         else:
             self.push_screen(HelpScreen())
+
+    # -- outbox: one background sender for the whole app --
+    def drain_outbox(self, force=False):
+        """Wake the sender thread. Idempotent and safe from any thread; force
+        retries messages that had failed for good."""
+        if force:
+            self._outbox_force = True
+        self._outbox_kick.set()
+
+    def _outbox_loop(self):
+        # a plain thread rather than a worker: two overlapping drains could
+        # otherwise deliver the same record twice
+        while True:
+            self._outbox_kick.wait()
+            self._outbox_kick.clear()
+            force, self._outbox_force = self._outbox_force, False
+            session, outbox = self.session, self.outbox
+            if session is None:
+                continue
+            try:
+                signed_in = {a.name for a in session.accounts}
+                for rec in outbox.due(signed_in, force):
+                    if self.session is not session:
+                        break  # logged out mid-drain
+                    try:
+                        if outbox.send(rec, session):
+                            self.call_from_thread(self._outbox_sent, rec)
+                    except Exception as exc:
+                        self.call_from_thread(self._outbox_failed, rec, exc)
+            except Exception:
+                pass  # the sender must outlive any single bad record or a closing app
+
+    def _outbox_sent(self, rec):
+        self.notify(escape(f'Sent to {rec["to"]}'))
+        main = self._main_screen()
+        if main is not None:
+            main._outbox_changed()
+
+    def _outbox_failed(self, rec, exc):
+        self.notify(escape(f'Not sent to {rec["to"]}: {be.err_text(exc)} — kept in Outbox'),
+                    severity='error', timeout=8)
+        main = self._main_screen()
+        if main is not None:
+            main._outbox_changed()
 
     # -- updates --
     @work(thread=True, exclusive=True, group='update-check')

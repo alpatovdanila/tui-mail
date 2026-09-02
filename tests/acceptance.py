@@ -19,6 +19,7 @@ TMP = tempfile.mkdtemp(prefix='tuimail-test-')
 os.environ['TUIMAIL_CONFIG'] = str(Path(TMP) / 'config.json')
 os.environ['TUIMAIL_DOWNLOADS'] = TMP
 os.environ['TUIMAIL_NO_UPDATE_CHECK'] = '1'  # never hit the GitHub API from tests
+os.environ['TUIMAIL_OUTBOX'] = str(Path(TMP) / 'outbox')
 
 from textual.widgets import DataTable, Input, ListView, Select, TextArea  # noqa: E402
 
@@ -396,6 +397,16 @@ async def settle(pilot, delay=0.0):
     await pilot.pause()
 
 
+async def wait_until(pilot, cond, timeout=6.0):
+    """Sending runs on a plain thread, not a worker — poll for its effects."""
+    import time as _t
+    t0 = _t.time()
+    while not cond():
+        assert _t.time() - t0 < timeout, 'timed out waiting for the background sender'
+        await pilot.pause(0.05)
+    await pilot.pause()
+
+
 async def demo_login(pilot):
     assert isinstance(pilot.app.screen, LoginScreen), pilot.app.screen
     await pilot.click('#demo')
@@ -534,8 +545,10 @@ async def phase3():
         app.screen.query_one('#subject', Input).value = 'Hello from tuimail'
         app.screen.query_one('#body', TextArea).text = 'Sent from the acceptance loop.'
         await pilot.press('ctrl+s')
+        await pilot.pause()
+        assert isinstance(app.screen, MainScreen)  # the composer closes at once
+        await wait_until(pilot, lambda: app.session.account('personal').backend.outbox)
         await settle(pilot)
-        assert isinstance(app.screen, MainScreen)
         sent = app.session.account('personal').backend.outbox[-1]
         assert sent['To'] == 'friend@example.com'
         assert sent['Subject'] == 'Hello from tuimail'
@@ -658,8 +671,9 @@ async def phase5():
         app.screen.query_one('#to', Input).value = 'x@y.z'
         app.screen.query_one('#subject', Input).value = 'from work'
         await pilot.press('ctrl+s')
-        await settle(pilot)
         wb = app.session.account('work').backend
+        await wait_until(pilot, lambda: wb.outbox)
+        await settle(pilot)
         assert wb.outbox[-1]['From'] == 'work@tuimail.demo'
         assert not app.session.account('personal').backend.outbox
 
@@ -873,6 +887,7 @@ async def phase10():
         assert be.load_config().get('last_attach_dir') == str(attach_src.parent)
 
         await pilot.press('ctrl+s')
+        await wait_until(pilot, lambda: app.session.account('personal').backend.outbox)
         await settle(pilot)
         sent = app.session.account('personal').backend.outbox[-1]
         atts = be.attachments_of(sent)
@@ -1152,7 +1167,187 @@ async def phase13():
     print('phase 13 (review fixes: account edit, layout focus): ok')
 
 
-PHASES_EXTRA = {'13': phase13}
+# --- phase 14: outbox ---------------------------------------------------------
+async def phase14():
+    import smtplib
+    import stat
+    import time as _t
+    from tuimail import outbox as ob
+    spool = Path(os.environ['TUIMAIL_OUTBOX'])
+    for p in spool.glob('*.json'):
+        p.unlink()
+
+    # a record queued in an earlier run (owner-only files) goes out right after sign-in
+    store = ob.Outbox()
+    rec0 = store.enqueue('personal', 'you@tuimail.demo', 'later@example.com',
+                         'from last run', 'body')
+    assert (spool / f'{rec0["id"]}.json').exists()
+    if os.name == 'posix':
+        assert stat.S_IMODE(spool.stat().st_mode) == 0o700
+        assert stat.S_IMODE((spool / f'{rec0["id"]}.json').stat().st_mode) == 0o600
+    app = TuiMail()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await demo_login(pilot)
+        main = app.screen
+        personal = app.session.account('personal').backend
+        await wait_until(pilot, lambda: personal.outbox)
+        assert personal.outbox[-1]['Subject'] == 'from last run'
+        await wait_until(pilot, lambda: not app.outbox.items())
+        await settle(pilot)
+        assert dict(main.folder_counts).get(be.OUTBOX) == 0
+        assert [n for n, _ in main.folder_counts][:2] == ['INBOX', be.OUTBOX]
+
+        # Ctrl+S closes the composer at once, even while the SMTP call is slow
+        real_send = personal.send
+
+        def slow_send(msg):
+            _t.sleep(0.8)
+            real_send(msg)
+        personal.send = slow_send
+        await pilot.press('c')
+        await pilot.pause()
+        app.screen.query_one('#to', Input).value = 'slow@example.com'
+        app.screen.query_one('#subject', Input).value = 'slow one'
+        await pilot.press('ctrl+s')
+        await pilot.pause()
+        assert isinstance(app.screen, MainScreen)
+        assert any(r['subject'] == 'slow one' for r in app.outbox.items())
+        assert dict(main.folder_counts).get(be.OUTBOX) == 1
+        await wait_until(pilot, lambda: personal.outbox[-1]['Subject'] == 'slow one')
+        await wait_until(pilot, lambda: dict(main.folder_counts).get(be.OUTBOX) == 0)
+
+        # a permanent failure stays in the Outbox with its error, no auto-retry
+        def refuse(msg):
+            raise smtplib.SMTPRecipientsRefused({'nobody@example.com': (550, b'no such user')})
+        personal.send = refuse
+        await pilot.press('c')
+        await pilot.pause()
+        app.screen.query_one('#to', Input).value = 'nobody@example.com'
+        app.screen.query_one('#subject', Input).value = 'bounces'
+        app.screen.query_one('#body', TextArea).text = 'will fail'
+        await pilot.press('ctrl+s')
+        await wait_until(pilot, lambda: any(r['tries'] for r in app.outbox.items()))
+        rec = app.outbox.items()[0]
+        assert rec['permanent'] and 'no such user' in rec['error'], rec
+        await wait_until(pilot, lambda: dict(main.folder_counts).get(be.OUTBOX) == 1)
+        app.drain_outbox()
+        await pilot.pause(0.3)
+        assert app.outbox.get(rec['id'])['tries'] == 1
+
+        # the Outbox folder shows it bold and marked, with the error in the preview
+        main.goto_folder(be.OUTBOX)
+        await settle(pilot)
+        assert main.folder == be.OUTBOX and len(main.view) == 1, main.view
+        s = main.view[0]
+        assert s.subject.startswith('⚠ ') and s.unread and s.recipient == 'nobody@example.com'
+        await pilot.pause(0.5)
+        await settle(pilot)
+        assert 'Not sent' in main.preview_text and 'no such user' in main.preview_text
+        assert any(be.decode_folder(n) == 'Outbox' for n, _ in main.folder_counts)
+        table(app).focus()
+        await pilot.pause()
+        for key in ('u', 's', 'A', 'm', 'L'):  # mailbox verbs are refused, not applied
+            await pilot.press(key)
+            await pilot.pause()
+            assert isinstance(app.screen, MainScreen) and len(main.view) == 1, key
+
+        # Enter edits it; the sender leaves a held record alone
+        await pilot.press('enter')
+        await pilot.pause()
+        assert isinstance(app.screen, ComposeScreen)
+        assert rec['id'] in app.outbox.held
+        assert app.screen.query_one('#to', Input).value == 'nobody@example.com'
+        assert app.screen.query_one('#body', TextArea).text == 'will fail'
+        assert app.outbox.due({'personal'}, force=True) == []
+        await pilot.press('escape')  # unchanged: closes without asking
+        await pilot.pause()
+        assert isinstance(app.screen, MainScreen) and rec['id'] not in app.outbox.held
+
+        # fix the address and resend: old record replaced, Message-ID kept, delivered
+        personal.send = real_send
+        await pilot.press('enter')
+        await pilot.pause()
+        assert isinstance(app.screen, ComposeScreen)
+        app.screen.query_one('#to', Input).value = 'somebody@example.com'
+        await pilot.press('ctrl+s')
+        await wait_until(pilot, lambda: personal.outbox[-1]['Subject'] == 'bounces')
+        assert app.outbox.get(rec['id']) is None
+        await wait_until(pilot, lambda: not app.outbox.items())
+        assert personal.outbox[-1]['To'] == 'somebody@example.com'
+        assert str(personal.outbox[-1]['Message-ID']) == rec['message_id']
+        await wait_until(pilot, lambda: main.view == [])
+        assert dict(main.folder_counts).get(be.OUTBOX) == 0
+
+        # transient failures back off; R in the Outbox retries right now
+        calls = []
+
+        def flaky(msg):
+            calls.append(1)
+            if len(calls) < 2:
+                raise ConnectionError('reset by peer')
+            real_send(msg)
+        personal.send = flaky
+        await pilot.press('c')
+        await pilot.pause()
+        app.screen.query_one('#to', Input).value = 'retry@example.com'
+        app.screen.query_one('#subject', Input).value = 'flaky'
+        await pilot.press('ctrl+s')
+        await wait_until(pilot, lambda: any(r['tries'] for r in app.outbox.items()))
+        rec = app.outbox.items()[0]
+        assert not rec['permanent'] and rec['tries'] == 1 and 'reset by peer' in rec['error']
+        app.drain_outbox()  # inside the backoff window: not tried again
+        await pilot.pause(0.3)
+        assert len(calls) == 1
+        assert app.outbox.status(app.outbox.get(rec['id'])) == 'retrying'
+        table(app).focus()
+        await pilot.pause()
+        await pilot.press('R')
+        await wait_until(pilot, lambda: not app.outbox.items())
+        assert len(calls) == 2 and personal.outbox[-1]['Subject'] == 'flaky'
+
+        # d deletes with undo; the commit removes the file
+        personal.send = refuse
+        await pilot.press('c')
+        await pilot.pause()
+        app.screen.query_one('#to', Input).value = 'gone@example.com'
+        app.screen.query_one('#subject', Input).value = 'to delete'
+        await pilot.press('ctrl+s')
+        await wait_until(pilot, lambda: any(r['tries'] for r in app.outbox.items()))
+        await wait_until(pilot, lambda: len(main.view) == 1)
+        table(app).focus()
+        await pilot.pause()
+        await pilot.press('d')
+        await pilot.pause()
+        assert main.view == [] and app.outbox.items()  # optimistic: the file waits for undo
+        await pilot.press('z')
+        await pilot.pause()
+        assert len(main.view) == 1
+        await pilot.press('d')
+        await pilot.pause()
+        main._flush_pending(sync=True)
+        await settle(pilot)
+        assert not app.outbox.items()
+        personal.send = real_send
+
+        # mail queued for an account that is not signed in waits, visible in the merged view
+        waiting = app.outbox.enqueue('nobody', 'x@y.z', 'a@b.c', 'orphan', 'body')
+        app.drain_outbox(force=True)
+        await pilot.pause(0.3)
+        assert app.outbox.get(waiting['id'])['tries'] == 0
+        main._outbox_changed()
+        await pilot.pause()
+        assert main.scope is None and len(main.view) == 1
+        assert main.view[0].subject.startswith('⏸ ')
+        main.set_scope('personal')
+        await settle(pilot)
+        assert main.folder == be.OUTBOX and main.view == []
+        main.set_scope(None)
+        await settle(pilot)
+        assert app.outbox.remove(waiting['id'])
+    print('phase 14 (outbox: queue, retry, edit, delete, persistence): ok')
+
+
+PHASES_EXTRA = {'13': phase13, '14': phase14}
 
 
 PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5,

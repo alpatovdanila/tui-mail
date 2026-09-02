@@ -33,6 +33,11 @@ class MailGone(Exception):
     """The message no longer exists on the server."""
 
 
+# virtual folder backed by the local outgoing spool (tuimail/outbox.py); the
+# prefix keeps it from ever colliding with a real IMAP folder called Outbox
+OUTBOX = 'tuimail:Outbox'
+
+
 # --- config ------------------------------------------------------------------
 PROVIDERS = {
     'Gmail': {
@@ -215,6 +220,9 @@ def decode_folder(name: str) -> str:
 
     The raw name stays the key for every IMAP command; Gmail labels in
     non-Latin scripts arrive as '&BB8EQAQ4BDIENQRC-' style."""
+    if name == OUTBOX:
+        return 'Outbox'
+
     def _dec(m):
         chunk = m.group(1)
         if not chunk:
@@ -409,13 +417,13 @@ def err_text(exc) -> str:
 
 
 def build_message(sender, to, subject, body, in_reply_to=None,
-                  attachments=None, markup=False) -> EmailMessage:
+                  attachments=None, markup=False, message_id=None) -> EmailMessage:
     m = EmailMessage()
     m['From'], m['To'], m['Subject'] = sender, to, subject
     m['Date'] = email.utils.formatdate(localtime=True)
     # pin the msgid domain to the sender's — the default embeds the local
     # machine's hostname in every outgoing mail
-    m['Message-ID'] = email.utils.make_msgid(
+    m['Message-ID'] = message_id or email.utils.make_msgid(
         domain=sender.rsplit('@', 1)[-1] if '@' in sender else None)
     if in_reply_to:
         m['In-Reply-To'] = m['References'] = ' '.join(in_reply_to.split())
@@ -721,6 +729,7 @@ class Session:
                   'deleted messages', 'junk/trash'),
         'archive': ('archive', 'archives', '[gmail]/all mail', 'all mail'),
     }
+    outbox = None  # tuimail.outbox.Outbox, attached by the app; backs the OUTBOX folder
 
     def folders_detailed(self, scope=None):
         """-> (merged [(name, unread)], {account: {folder: unread}}); remembers
@@ -746,7 +755,12 @@ class Session:
                 merged[name] += unread
         if not merged and last_err is not None:
             raise last_err  # every account failed — that's an outage, not an empty list
-        return [(n, merged[n]) for n in order], per_account
+        counts = [(n, merged[n]) for n in order]
+        if self.outbox is not None:
+            names = None if scope is None else {a.name for a in accts}
+            queued = len(self.outbox.summaries(names))
+            counts.insert(min(1, len(counts)), (OUTBOX, queued))  # right under INBOX
+        return counts, per_account
 
     def folders(self, scope=None):
         return self.folders_detailed(scope)[0]
@@ -782,10 +796,14 @@ class Session:
         return None
 
     def move(self, account, folder, uid, dest):
+        if OUTBOX in (folder, dest):
+            raise RuntimeError('Outbox messages can only be sent or deleted')
         self.account(account).backend.move(folder, uid, dest)
 
     def list_older(self, folder, scope, min_uids):
         """Next page per account: messages older than min_uids[account]."""
+        if folder == OUTBOX:
+            return []
         out = []
         for a in self.scoped(scope):
             before = min_uids.get(a.name)
@@ -803,6 +821,13 @@ class Session:
         return out
 
     def list_messages(self, folder, scope=None):
+        if folder == OUTBOX:
+            if self.outbox is None:
+                return []
+            # the merged view also shows mail queued for an account that is
+            # not signed in right now — otherwise it could never be deleted
+            return self.outbox.summaries(None if scope is None else {scope},
+                                         signed_in={a.name for a in self.accounts})
         accts = self.scoped(scope)
         out, ok, last_err = [], 0, None
         for a in accts:
@@ -824,17 +849,30 @@ class Session:
         return out
 
     def fetch(self, account, folder, uid):
+        if folder == OUTBOX:
+            rec = self.outbox.get(uid) if self.outbox is not None else None
+            if rec is None:
+                raise MailGone()
+            return self.outbox.message(rec, for_preview=True)
         return self.account(account).backend.fetch(folder, uid)
 
     def mark(self, account, folder, uid, read=True):
+        if folder == OUTBOX:
+            return  # bold in the Outbox means "failed", not "unread"
         self.account(account).backend.mark(folder, uid, read=read)
 
     def flag(self, account, folder, uid, flagged=True):
+        if folder == OUTBOX:
+            return
         self.account(account).backend.flag(folder, uid, flagged=flagged)
 
     def delete(self, account, folder, uid):
         """Delete = move to the account's Trash when it has one (recoverable);
         deleting from Trash itself, or without a Trash folder, expunges."""
+        if folder == OUTBOX:
+            if self.outbox is not None:
+                self.outbox.remove(uid)
+            return
         trash = self.special_folder(account, 'trash')
         if trash and folder != trash:
             self.account(account).backend.move(folder, uid, trash)
@@ -843,6 +881,11 @@ class Session:
 
     def search(self, folder, query, scope=None):
         """-> ({(account, uid)}, [account names that need a local fallback])"""
+        if folder == OUTBOX:
+            q = query.lower()
+            return {(r['account'], r['id']) for r in (self.outbox.items() if self.outbox else [])
+                    if scope in (None, r['account'])
+                    and q in f'{r["to"]} {r["subject"]} {r["body"]}'.lower()}, []
         hits, fallback = set(), []
         for a in self.scoped(scope):
             try:

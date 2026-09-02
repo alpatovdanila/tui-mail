@@ -2,6 +2,10 @@ import sys
 
 
 def main():
+    if '--version' in sys.argv:
+        from . import __version__
+        print(f'tuimail {__version__}')
+        return
     if '--check' in sys.argv:  # headless boot smoke test, used by CI
         import asyncio
         import os
