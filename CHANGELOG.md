@@ -4,6 +4,16 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.7.1 — 2026-09-02
+
+### Fixed
+- The terminal is no longer silent while the app boots: "tuimail is
+  starting..." (or "Preparing the first start..." on a fresh install) prints
+  before the UI loads. The one remaining silent moment is macOS scanning a
+  freshly installed binary — one-time, before any code runs.
+- install.sh works under macOS's ancient /bin/sh (bash 3.2): the script is
+  ASCII-only with braced variable expansions.
+
 ## 1.7.0 — 2026-09-02
 
 ### Added

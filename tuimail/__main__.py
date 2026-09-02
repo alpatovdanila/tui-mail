@@ -2,7 +2,6 @@ import sys
 
 
 def main():
-    from .app import TuiMail
     if '--check' in sys.argv:  # headless boot smoke test, used by CI
         import asyncio
         import os
@@ -10,6 +9,7 @@ def main():
         import email
         import email.policy
 
+        from .app import TuiMail
         from .backend import body_markdown
         probe = email.message_from_bytes(
             b'Content-Type: text/html\r\n\r\n<h2>ok</h2>',
@@ -24,6 +24,17 @@ def main():
         asyncio.run(go())
         print('ok')
         return
+
+    # print before the heavy Textual import so the terminal isn't silent
+    # while the app boots (the frozen build also self-extracts first)
+    from . import backend as be
+    if be.load_config().get('accounts'):
+        print('tuimail is starting...', flush=True)
+    else:
+        print('Preparing the first start... (the very first launch takes the longest)',
+              flush=True)
+
+    from .app import TuiMail
     app = TuiMail()
     app.run()
     if getattr(app, 'restart_after_exit', False):
