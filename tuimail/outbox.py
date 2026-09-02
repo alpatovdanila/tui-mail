@@ -11,6 +11,7 @@ sender thread and the UI never fight over a shared index.
 import email.utils
 import json
 import os
+import shutil
 import smtplib
 import threading
 import time
@@ -22,6 +23,9 @@ from . import backend as be
 
 OUTBOX = be.OUTBOX
 MAX_TRIES = 5
+FIELDS = ('id', 'account', 'address', 'to', 'subject', 'body', 'in_reply_to',
+          'attachments', 'markup', 'message_id', 'created', 'tries', 'last_try',
+          'error', 'permanent')
 
 
 def outbox_dir() -> Path:
@@ -54,6 +58,10 @@ def _retry_io(fn, tries=40):
             time.sleep(0.025)
 
 
+def _clean(value) -> str:
+    return be.sanitize(str(value), keep_newlines=False)
+
+
 class Outbox:
     MARK = {'failed': '⚠ ', 'sending': '⋯ ', 'retrying': '↻ ', 'waiting': '⏸ '}
 
@@ -68,34 +76,81 @@ class Outbox:
     def _file(self, id):
         return self.path / f'{id}.json'
 
-    def _write(self, rec):
+    def _files(self, id):
+        return self.path / f'{id}.files'
+
+    def _mkdir(self):
         self.path.mkdir(parents=True, exist_ok=True)
         if os.name == 'posix':
             os.chmod(self.path, 0o700)
+
+    def _write(self, rec):
+        self._mkdir()
         target = self._file(rec['id'])
         tmp = target.with_suffix('.tmp')
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(rec, f)
-        _retry_io(lambda: os.replace(tmp, target))
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(rec, f)
+            _retry_io(lambda: os.replace(tmp, target))
+        except BaseException:
+            try:
+                tmp.unlink()  # never leave a half-written copy of the mail behind
+            except OSError:
+                pass
+            raise
+
+    def _copy_attachments(self, id, paths):
+        """Snapshot the attachments into the spool: what was attached is what
+        gets sent, however the originals change (or vanish) before a retry."""
+        if not paths:
+            return []
+        fdir = self._files(id)
+        fdir.mkdir(parents=True, exist_ok=True)
+        if os.name == 'posix':
+            os.chmod(fdir, 0o700)
+        out, used = [], set()
+        try:
+            for n, src in enumerate(paths):
+                src = Path(src)
+                name = src.name if src.name not in used else f'{n}-{src.name}'
+                used.add(name)
+                dest = fdir / name
+                shutil.copyfile(src, dest)
+                if os.name == 'posix':
+                    os.chmod(dest, 0o600)
+                out.append(str(dest))
+        except BaseException:
+            shutil.rmtree(fdir, ignore_errors=True)
+            raise
+        return out
 
     def enqueue(self, account, address, to, subject, body, *, in_reply_to='',
                 attachments=(), markup=False, message_id=''):
-        rec = dict(
-            id=uuid.uuid4().hex[:12], account=account, address=address, to=to,
-            subject=subject, body=body, in_reply_to=in_reply_to or '',
-            attachments=[str(p) for p in attachments], markup=bool(markup),
-            # fixed at enqueue time: a retry after a half-completed transaction
-            # re-sends the same message, not a new one
-            message_id=message_id or email.utils.make_msgid(
-                domain=address.rsplit('@', 1)[-1] if '@' in address else None),
-            created=time.time(), tries=0, last_try=0.0, error='', permanent=False)
-        with self._lock:
-            self._write(rec)
+        id = uuid.uuid4().hex[:12]
+        self._mkdir()
+        self.held.add(id)  # invisible to the sender and the sweeper until fully written
+        try:
+            rec = dict(
+                id=id, account=account, address=address, to=to,
+                subject=subject, body=body, in_reply_to=in_reply_to or '',
+                attachments=self._copy_attachments(id, attachments), markup=bool(markup),
+                # fixed at enqueue time: a retry after a half-completed transaction
+                # re-sends the same message, not a new one
+                message_id=message_id or email.utils.make_msgid(
+                    domain=address.rsplit('@', 1)[-1] if '@' in address else None),
+                created=time.time(), tries=0, last_try=0.0, error='', permanent=False)
+            with self._lock:
+                self._write(rec)
+        except BaseException:
+            shutil.rmtree(self._files(id), ignore_errors=True)
+            raise
+        finally:
+            self.held.discard(id)
         return rec
 
     def items(self):
-        out = []
+        out, ids = [], set()
         for p in self.path.glob('*.json'):
             if p.stem in self.done:
                 try:
@@ -108,10 +163,34 @@ class Outbox:
                 rec = json.loads(p.read_text('utf-8'))
             except (OSError, ValueError):
                 continue
-            if isinstance(rec, dict) and rec.get('id') == p.stem:
-                out.append(rec)
+            # one damaged record must not take every folder load down with it
+            if not (isinstance(rec, dict) and rec.get('id') == p.stem
+                    and all(k in rec for k in FIELDS)
+                    and isinstance(rec['attachments'], list)):
+                continue
+            ids.add(p.stem)
+            out.append(rec)
+        self._sweep(ids)
         out.sort(key=lambda r: r.get('created', 0), reverse=True)  # newest first
         return out
+
+    def _sweep(self, live_ids):
+        """Leftovers of crashed writes (old .tmp) and attachment snapshots
+        whose record is gone carry message content — remove them."""
+        now = time.time()
+        try:
+            entries = list(self.path.iterdir())
+        except OSError:
+            return
+        for p in entries:
+            try:
+                if p.suffix == '.tmp' and now - p.stat().st_mtime > 60:
+                    p.unlink()
+                elif (p.suffix == '.files' and p.is_dir() and p.stem not in live_ids
+                      and p.stem not in self.sending and p.stem not in self.held):
+                    shutil.rmtree(p, ignore_errors=True)
+            except OSError:
+                pass
 
     def get(self, id):
         if id in self.done:
@@ -123,6 +202,7 @@ class Outbox:
         return rec if isinstance(rec, dict) else None
 
     def remove(self, id) -> bool:
+        shutil.rmtree(self._files(id), ignore_errors=True)
         try:
             _retry_io(self._file(id).unlink)
             return True
@@ -150,17 +230,18 @@ class Outbox:
 
     def describe(self, rec, signed_in=None) -> str:
         st = self.status(rec, signed_in)
+        err = _clean(rec['error'])  # spool files are data, not trusted text
         if st == 'sending':
             return 'Sending now …'
         if st == 'waiting':
-            return f'Waiting — account {rec["account"]} is not signed in'
+            return f'Waiting — account {_clean(rec["account"])} is not signed in'
         if st == 'failed':
             n = rec['tries']
-            return (f'Not sent after {n} attempt{"s" if n != 1 else ""}: {rec["error"]}'
+            return (f'Not sent after {n} attempt{"s" if n != 1 else ""}: {err}'
                     '  —  Enter edits, R retries, d deletes')
         if st == 'retrying':
             wait = max(0, int(rec['last_try'] + 60 * rec['tries'] - time.time()))
-            return f'Retrying in {wait} s — attempt {rec["tries"]} failed: {rec["error"]}'
+            return f'Retrying in {wait} s — attempt {rec["tries"]} failed: {err}'
         return 'Queued — sending shortly'
 
     def summaries(self, accounts=None, signed_in=None):
@@ -170,11 +251,11 @@ class Outbox:
                 continue
             st = self.status(rec, signed_in)
             out.append(be.Summary(
-                uid=rec['id'], sender=rec['address'],
-                subject=self.MARK.get(st, '') + (rec['subject'] or '(no subject)'),
+                uid=rec['id'], sender=_clean(rec['address']),
+                subject=self.MARK.get(st, '') + (_clean(rec['subject']) or '(no subject)'),
                 date=datetime.fromtimestamp(rec['created'], timezone.utc),
                 unread=st == 'failed',  # bold = needs attention
-                account=rec['account'], recipient=rec['to']))
+                account=rec['account'], recipient=_clean(rec['to'])))
         return out
 
     def message(self, rec, for_preview=False):

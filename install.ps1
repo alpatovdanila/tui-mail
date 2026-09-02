@@ -31,9 +31,18 @@ Move-Item -Force $tmp $exe
 if (-not $env:TUIMAIL_NO_PATH) {
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   if (($userPath -split ';') -notcontains $dir) {
-    [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User')
-    Write-Host "Added $dir to your PATH - open a new terminal."
+    # prepended: a stale copy elsewhere (an old pip install in Python\Scripts,
+    # say) must not keep winning over the fresh binary
+    [Environment]::SetEnvironmentVariable('Path', "$dir;$userPath", 'User')
+    Write-Host "Added $dir to the front of your PATH - open a new terminal."
   }
 }
 
-Write-Host "Installed tuimail $($api.tag_name) to $exe - run: tuimail"
+$other = Get-Command tuimail -All -ErrorAction SilentlyContinue |
+  Where-Object { $_.Source -and $_.Source -ne $exe } | Select-Object -First 1
+if ($other) {
+  Write-Warning "Another tuimail is also on your PATH: $($other.Source) - probably an older copy."
+  Write-Warning "Remove it (for a Python install: pip uninstall tuimail / pipx uninstall tuimail), or 'tuimail' may keep starting that one."
+}
+
+Write-Host "Installed tuimail $($api.tag_name) to $exe - run: tuimail   (tuimail --version shows what runs)"

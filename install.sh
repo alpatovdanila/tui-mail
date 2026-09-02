@@ -60,4 +60,24 @@ if [ -z "${TUIMAIL_NO_PATH:-}" ]; then
   esac
 fi
 
+# an older copy earlier on PATH (e.g. /usr/local/bin/tuimail linked by a
+# previous .app install) would silently keep winning over the new binary
+FOUND="$(command -v tuimail 2>/dev/null || true)"
+if [ -n "${FOUND}" ] && [ "${FOUND}" != "${BIN_DIR}/tuimail" ]; then
+  LINK_TARGET="$(readlink "${FOUND}" 2>/dev/null || true)"
+  case "${LINK_TARGET}" in
+    *"/Caskroom/"*)
+      echo "note: ${FOUND} is Homebrew's tuimail and comes first on PATH - keep it updated with: brew upgrade --cask tuimail" >&2
+      ;;
+    *)
+      if [ -L "${FOUND}" ] && [ -w "$(dirname "${FOUND}")" ]; then
+        ln -sf "${BIN_DIR}/tuimail" "${FOUND}" && echo "Repointed ${FOUND} (was an older copy) to the new binary."
+      else
+        echo "warning: ${FOUND} comes first on PATH and is a different, probably older, copy." >&2
+        echo "         Remove it (rm \"${FOUND}\") or 'tuimail' keeps starting that one." >&2
+      fi
+      ;;
+  esac
+fi
+
 echo "Installed tuimail ${TAG} to ${BIN_DIR}/tuimail - run: tuimail"

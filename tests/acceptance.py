@@ -1344,6 +1344,89 @@ async def phase14():
         main.set_scope(None)
         await settle(pilot)
         assert app.outbox.remove(waiting['id'])
+
+        # attachments are snapshotted into the spool at queue time: editing or
+        # deleting the original afterwards changes nothing about what is sent
+        src = Path(TMP) / 'numbers.txt'
+        src.write_text('v1', encoding='utf-8')
+        personal.send = refuse
+        await pilot.press('c')
+        await pilot.pause()
+        app.screen.query_one('#to', Input).value = 'files@example.com'
+        app.screen.query_one('#subject', Input).value = 'with file'
+        app.screen.attachments.append(src)
+        await pilot.press('ctrl+s')
+        await wait_until(pilot, lambda: any(r['tries'] for r in app.outbox.items()))
+        rec = app.outbox.items()[0]
+        assert len(rec['attachments']) == 1
+        copy = Path(rec['attachments'][0])
+        assert copy.parent == spool / f'{rec["id"]}.files' and copy.read_text() == 'v1'
+        src.write_text('v2', encoding='utf-8')
+        assert be.attachments_of(app.outbox.message(rec))[0][1] == b'v1'
+        personal.send = real_send
+        app.drain_outbox(force=True)
+        await wait_until(pilot, lambda: not app.outbox.items())
+        assert be.attachments_of(personal.outbox[-1])[0][1] == b'v1'
+        assert not copy.parent.exists()  # the snapshot goes with the record
+
+        # d on a queued message holds it for the undo window: a retry landing
+        # in that window must not send what the user just deleted
+        personal.send = refuse
+        await pilot.press('c')
+        await pilot.pause()
+        app.screen.query_one('#to', Input).value = 'held@example.com'
+        app.screen.query_one('#subject', Input).value = 'held while deleted'
+        await pilot.press('ctrl+s')
+        await wait_until(pilot, lambda: any(r['tries'] for r in app.outbox.items()))
+        await wait_until(pilot, lambda: len(main.view) == 1)
+        personal.send = real_send
+        table(app).focus()
+        await pilot.pause()
+        await pilot.press('d')
+        await pilot.pause()
+        app.drain_outbox(force=True)
+        await pilot.pause(0.4)
+        assert personal.outbox[-1]['Subject'] != 'held while deleted'
+        assert app.outbox.items()
+        await pilot.press('z')  # undo releases it; R (forced) sends it now
+        await pilot.pause()
+        app.drain_outbox(force=True)
+        await wait_until(pilot, lambda: not app.outbox.items())
+        assert personal.outbox[-1]['Subject'] == 'held while deleted'
+
+        # a damaged spool file or a stale temp file never breaks folder loads
+        (spool / 'bad.json').write_text('{"id": "bad"}', encoding='utf-8')
+        (spool / 'notjson.json').write_text('{', encoding='utf-8')
+        stale = spool / 'crash.tmp'
+        stale.write_text('secret body', encoding='utf-8')
+        os.utime(stale, (_t.time() - 3600, _t.time() - 3600))
+        assert app.outbox.items() == []
+        assert not stale.exists()
+        counts, _ = app.session.folders_detailed(None)
+        assert dict(counts).get(be.OUTBOX) == 0
+        (spool / 'bad.json').unlink()
+        (spool / 'notjson.json').unlink()
+
+        # a spool write failure keeps the draft open instead of losing it
+        real_enqueue = app.outbox.enqueue
+
+        def broken(*a, **k):
+            raise OSError('disk full')
+        app.outbox.enqueue = broken
+        await pilot.press('c')
+        await pilot.pause()
+        app.screen.query_one('#to', Input).value = 'kept@example.com'
+        app.screen.query_one('#body', TextArea).text = 'precious'
+        await pilot.press('ctrl+s')
+        await pilot.pause()
+        assert isinstance(app.screen, ComposeScreen)
+        assert app.screen.query_one('#body', TextArea).text == 'precious'
+        app.outbox.enqueue = real_enqueue
+        await pilot.press('escape')
+        await pilot.pause()
+        await pilot.press('y')
+        await pilot.pause()
+        assert isinstance(app.screen, MainScreen)
     print('phase 14 (outbox: queue, retry, edit, delete, persistence): ok')
 
 

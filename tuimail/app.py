@@ -1551,6 +1551,11 @@ class MainScreen(Screen):
         if any((p.account, p.uid) == key for p, _, _, _ in self._pending) or key in self._inflight:
             return  # already on its way
         folder = self.folder
+        if folder == be.OUTBOX:
+            if s.uid in self.app.outbox.sending:
+                self.app.notify('This message is being sent right now')
+                return
+            self.app.outbox.hold(s.uid)  # the sender must not deliver it during the undo window
         live = self._live(s)
         s = live or s
         index = self.all_msgs.index(live) if live is not None else 0
@@ -1578,6 +1583,8 @@ class MainScreen(Screen):
                 session.delete(s.account, folder, s.uid)
             finally:
                 self._inflight.discard(key)
+                if folder == be.OUTBOX:
+                    self.app.outbox.release(s.uid)
         self._io(go, reload=folder == be.OUTBOX)  # the Outbox count lives in folder_counts
 
     def _commit_delete(self, s):
@@ -1598,6 +1605,8 @@ class MainScreen(Screen):
                     self.app.session.delete(s.account, folder, s.uid)
                 except Exception:
                     pass
+                if folder == be.OUTBOX:
+                    self.app.outbox.release(s.uid)
             else:
                 self._server_delete(s, folder)
 
@@ -1607,6 +1616,9 @@ class MainScreen(Screen):
             return
         s, index, folder, timer = self._pending.pop()
         timer.stop()
+        if folder == be.OUTBOX:
+            self.app.outbox.release(s.uid)  # back in the sender's queue
+            self.app.drain_outbox()
         if self._live(s) is None:  # never insert a duplicate key
             self.all_msgs.insert(min(index, len(self.all_msgs)), s)
         if s.unread:
@@ -1986,14 +1998,19 @@ class ComposeScreen(Screen[bool]):
         if old and old in outbox.sending:
             app.notify('This message is being sent right now — nothing to change')
             return
-        if old:
-            outbox.remove(old)
         # queued locally first: the composer closes at once and the sender
         # thread delivers in the background; a failure lands in the Outbox
-        outbox.enqueue(account, app.session.address(account), to, subject, body,
-                       in_reply_to=self.seed.get('in_reply_to') or '',
-                       attachments=self.attachments, markup=self._used_markup,
-                       message_id=self.seed.get('message_id') or '')
+        try:
+            outbox.enqueue(account, app.session.address(account), to, subject, body,
+                           in_reply_to=self.seed.get('in_reply_to') or '',
+                           attachments=self.attachments, markup=self._used_markup,
+                           message_id=self.seed.get('message_id') or '')
+        except Exception as exc:
+            app.notify(escape(f'Could not queue the message: {be.err_text(exc)}'),
+                       severity='error', timeout=8)
+            return  # the draft stays open — nothing typed is lost
+        if old:
+            outbox.remove(old)  # only once the replacement is safely on disk
         app.notify(escape(f'Sending to {to} — the Outbox keeps it if that fails'), timeout=3)
         if app.screen is self:
             self.dismiss(True)  # dismiss pops the CURRENT screen — only pop ourselves

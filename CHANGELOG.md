@@ -20,6 +20,12 @@ with these notes automatically.
   deletes (with the usual undo). Mail still queued when you quit goes out at
   the next start.
 - `tuimail --version`.
+- Both installers now notice another `tuimail` earlier on PATH (a stale
+  `pip install` in `Python\Scripts`, or `/usr/local/bin/tuimail` left by an
+  old `.app` install): the Windows installer puts its directory at the front
+  of the user PATH and names the other copy; the macOS one repoints a plain
+  symlink and otherwise tells you which file to remove. `tuimail --version`
+  shows which copy actually runs.
 
 ### Removed
 - The old behaviour where a failed send silently dropped you back into the
