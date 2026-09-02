@@ -4,6 +4,17 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.9.0 — 2026-09-02
+
+### Added
+- **Compose formatting**: Ctrl+B bold, Ctrl+E italic (Ctrl+I is Tab in
+  terminals), Ctrl+K link — markers wrap the selection; formatted mail is
+  sent with an HTML alternative part so recipients see real bold/italic/
+  links, while the plain part stays readable.
+- **File attachments**: Ctrl+O opens a picker — browse the directory tree or
+  type a path with shell-style Tab completion; the last-used directory is
+  remembered. Attached files are listed under the subject line.
+
 ## 1.8.0 — 2026-09-02
 
 ### Added

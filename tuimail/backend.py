@@ -11,6 +11,7 @@ Carries fixes for review-confirmed bugs of the old prototype:
 """
 import base64
 import email
+import mimetypes
 import email.header
 import email.policy
 import email.utils
@@ -348,7 +349,21 @@ def reply_seed(msg) -> dict:
             'in_reply_to': ' '.join(mid.split())}
 
 
-def build_message(sender, to, subject, body, in_reply_to=None) -> EmailMessage:
+def markup_html(body) -> str | None:
+    """Compose markup (**bold**, *italic*, [text](url)) -> an HTML alternative;
+    None when the body carries no markup, keeping unformatted mail plain."""
+    import html as _html
+    esc = _html.escape(body)
+    out = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', esc)
+    out = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', out)
+    out = re.sub(r'\[([^\]]+)\]\((https?://[^)\s]+)\)', r'<a href="\2">\1</a>', out)
+    if out == esc:
+        return None
+    return '<html><body>' + out.replace('\n', '<br>\n') + '</body></html>'
+
+
+def build_message(sender, to, subject, body, in_reply_to=None,
+                  attachments=None) -> EmailMessage:
     m = EmailMessage()
     m['From'], m['To'], m['Subject'] = sender, to, subject
     m['Date'] = email.utils.formatdate(localtime=True)
@@ -359,6 +374,15 @@ def build_message(sender, to, subject, body, in_reply_to=None) -> EmailMessage:
     if in_reply_to:
         m['In-Reply-To'] = m['References'] = ' '.join(in_reply_to.split())
     m.set_content(body)
+    rich = markup_html(body)
+    if rich:
+        m.add_alternative(rich, subtype='html')
+    for path in attachments or []:
+        p = Path(path)
+        ctype = mimetypes.guess_type(p.name)[0] or 'application/octet-stream'
+        maintype, _, subtype = ctype.partition('/')
+        m.add_attachment(p.read_bytes(), maintype=maintype, subtype=subtype,
+                         filename=p.name)
     return m
 
 

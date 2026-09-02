@@ -14,9 +14,9 @@ from textual.command import Hit, Provider
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
-from textual.widgets import (Button, Checkbox, DataTable, Footer, Header,
-                             Input, Label, ListItem, ListView, Markdown,
-                             OptionList, Select, Static, TextArea)
+from textual.widgets import (Button, Checkbox, DataTable, DirectoryTree,
+                             Footer, Header, Input, Label, ListItem, ListView,
+                             Markdown, OptionList, Select, Static, TextArea)
 
 from . import backend as be
 from . import update as up
@@ -50,6 +50,11 @@ HELP_ROWS = [
     ('/', 'search this folder (Esc clears)'),
     ('R', 'refresh'),
     ('', ''),
+    ('Compose', ''),
+    ('Ctrl+S / Esc', 'send / cancel'),
+    ('Ctrl+B  Ctrl+E  Ctrl+K', 'bold, italic, link'),
+    ('Ctrl+O', 'attach a file (Tab completes paths)'),
+    ('', ''),
     ('Reader', ''),
     ('j k Space', 'scroll / page'),
     ('o', 'open a link from the message'),
@@ -75,6 +80,24 @@ def ui_callback(fn):
         except NoMatches:
             pass
     return inner
+
+
+def complete_path(value):
+    """Shell-style Tab completion for a filesystem path."""
+    expanded = os.path.expanduser(value) or '.'
+    base, prefix = os.path.split(expanded)
+    try:
+        entries = [e for e in os.listdir(base or '.')
+                   if e.lower().startswith(prefix.lower())]
+    except OSError:
+        return value
+    if not entries:
+        return value
+    if len(entries) == 1:
+        full = os.path.join(base, entries[0])
+        return full + os.sep if os.path.isdir(full) else full
+    common = os.path.commonprefix(entries)
+    return os.path.join(base, common) if len(common) > len(prefix) else value
 
 
 def account_label(name, color, address=''):
@@ -127,6 +150,51 @@ class HelpScreen(ModalScreen):
 
     def action_close(self):
         self.dismiss()
+
+
+class FilePickScreen(ModalScreen):
+    """Attach-file dialog: browse the tree, or type a path (Tab completes)."""
+    BINDINGS = [Binding('escape', 'close', 'Cancel')]
+
+    def __init__(self, start_dir):
+        super().__init__()
+        self.start_dir = start_dir
+
+    def compose(self):
+        with Vertical(id='filepick-card'):
+            yield Label('Attach a file — Enter picks, Tab completes the path, Esc cancels',
+                        classes='card-title')
+            yield Input(value=str(self.start_dir) + os.sep, id='path',
+                        placeholder='Type a path — Tab completes like your shell')
+            yield DirectoryTree(str(self.start_dir), id='ftree')
+
+    def on_mount(self):
+        inp = self.query_one('#path', Input)
+        inp.focus()
+        inp.cursor_position = len(inp.value)
+
+    def on_key(self, event):
+        inp = self.query_one('#path', Input)
+        if event.key == 'tab' and inp.has_focus:
+            inp.value = complete_path(inp.value)
+            inp.cursor_position = len(inp.value)
+            event.stop()
+            event.prevent_default()
+
+    def on_input_submitted(self, event):
+        p = Path(os.path.expanduser(event.value.strip().strip('"')))
+        if p.is_file():
+            self.dismiss(p)
+        elif p.is_dir():
+            self.query_one('#ftree', DirectoryTree).path = p
+        else:
+            self.app.notify('No such file', severity='warning')
+
+    def on_directory_tree_file_selected(self, event):
+        self.dismiss(Path(event.path))
+
+    def action_close(self):
+        self.dismiss(None)
 
 
 class LinksScreen(ModalScreen):
@@ -1136,12 +1204,17 @@ class ComposeScreen(Screen[bool]):
     BINDINGS = [
         Binding('ctrl+s', 'send', 'Send', priority=True),
         Binding('escape', 'cancel', 'Cancel', priority=True),
+        Binding('ctrl+o', 'attach', 'Attach', priority=True),
+        Binding('ctrl+b', 'fmt_bold', 'Bold', priority=True),
+        Binding('ctrl+e', 'fmt_italic', 'Italic', priority=True),
+        Binding('ctrl+k', 'fmt_link', 'Link', priority=True),
     ]
 
     def __init__(self, seed=None):
         super().__init__()
         self.seed = seed or {}
         self._sending = False
+        self.attachments = []
 
     def compose(self):
         session = self.app.session
@@ -1149,10 +1222,13 @@ class ComposeScreen(Screen[bool]):
                    for a in session.accounts]
         value = self.seed.get('account') or session.accounts[0].name
         with Vertical():
-            yield Label('✉  New message — Ctrl+S sends, Esc cancels', classes='card-title')
+            yield Label('✉  New message — ^S send · ^O attach · '
+                        '^B bold · ^E italic · ^K link · Esc cancel',
+                        classes='card-title')
             yield Select(options, value=value, allow_blank=False, id='from')
             yield Input(placeholder='To', id='to')
             yield Input(placeholder='Subject', id='subject')
+            yield Static(id='attach-line')
             yield TextArea(id='body')
         yield Footer()
 
@@ -1161,6 +1237,53 @@ class ComposeScreen(Screen[bool]):
         self.query_one('#subject', Input).value = self.seed.get('subject', '')
         self.query_one('#body', TextArea).text = self.seed.get('body', '')
         self.query_one('#body' if self.seed.get('to') else '#to').focus()
+
+    # -- formatting & attachments --
+    def _wrap(self, left, right):
+        ta = self.query_one('#body', TextArea)
+        sel = ta.selected_text
+        if sel:
+            start, end = sorted((ta.selection.start, ta.selection.end))
+            ta.replace(f'{left}{sel}{right}', start, end)
+        else:
+            ta.insert(left + right)
+            ta.move_cursor_relative(columns=-len(right))
+        ta.focus()
+
+    def action_fmt_bold(self):
+        self._wrap('**', '**')
+
+    def action_fmt_italic(self):
+        self._wrap('*', '*')
+
+    def action_fmt_link(self):
+        ta = self.query_one('#body', TextArea)
+        label = ta.selected_text or 'link text'
+        start, end = sorted((ta.selection.start, ta.selection.end))
+        ta.replace(f'[{label}](https://)', start, end)
+        ta.move_cursor_relative(columns=-1)  # cursor inside the (), after https://
+        ta.focus()
+
+    def action_attach(self):
+        start = Path(be.load_config().get('last_attach_dir', str(Path.home())))
+        if not start.is_dir():
+            start = Path.home()
+
+        def done(picked):
+            if not picked:
+                return
+            self.attachments.append(Path(picked))
+            cfg = be.load_config()
+            cfg['last_attach_dir'] = str(Path(picked).parent)
+            be.save_config(cfg)
+            self._update_attach_line()
+        self.app.push_screen(FilePickScreen(start), done)
+
+    def _update_attach_line(self):
+        line = self.query_one('#attach-line', Static)
+        line.update(Text('📎 ' + ', '.join(p.name for p in self.attachments),
+                         style='cyan'))
+        line.display = bool(self.attachments)
 
     def action_send(self):
         if self._sending:
@@ -1181,7 +1304,8 @@ class ComposeScreen(Screen[bool]):
         app = self.app
         try:
             msg = be.build_message(app.session.address(account), to, subject, body,
-                                   self.seed.get('in_reply_to'))
+                                   self.seed.get('in_reply_to'),
+                                   attachments=self.attachments)
             app.session.send(account, msg)
         except Exception as exc:
             app.call_from_thread(self._send_failed, exc)
@@ -1204,7 +1328,7 @@ class ComposeScreen(Screen[bool]):
         subject = self.query_one('#subject', Input).value
         body = self.query_one('#body', TextArea).text
         dirty = (to != self.seed.get('to', '') or subject != self.seed.get('subject', '')
-                 or body != self.seed.get('body', ''))
+                 or body != self.seed.get('body', '') or bool(self.attachments))
         if not dirty:
             self.dismiss(False)
             return

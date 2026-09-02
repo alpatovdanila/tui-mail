@@ -178,6 +178,38 @@ def helpers():
         policy=email.policy.default)
     assert be.body_markdown(m5) is None
 
+    # compose markup: bold/italic/link become an HTML alternative, escaped
+    rich = be.build_message('a@b.c', 'x@y.z', 's',
+                            '**bold** and *it* [go](https://x.y) <script>')
+    html_part = rich.get_body(preferencelist=('html',))
+    assert html_part is not None
+    html_src = html_part.get_content()
+    assert '<b>bold</b>' in html_src and '<i>it</i>' in html_src
+    assert '<a href="https://x.y">go</a>' in html_src
+    assert '<script>' not in html_src and '&lt;script&gt;' in html_src
+    assert be.body_of(rich).strip().startswith('**bold**')  # plain part keeps markup text
+    plain = be.build_message('a@b.c', 'x@y.z', 's', 'no markup here')
+    assert plain.get_body(preferencelist=('html',)) is None
+
+    # attachments ride along with the right filename
+    att = Path(TMP) / 'notes.txt'
+    att.write_text('hi', encoding='utf-8')
+    with_att = be.build_message('a@b.c', 'x@y.z', 's', 'b', attachments=[att])
+    got = be.attachments_of(with_att)
+    assert got and got[0][0] == 'notes.txt' and got[0][1] == b'hi'
+
+    # shell-style path completion
+    from tuimail.app import complete_path
+    cdir = Path(TMP) / 'comp'
+    cdir.mkdir()
+    (cdir / 'alpha.txt').write_text('a')
+    (cdir / 'alphabet.txt').write_text('b')
+    (cdir / 'beta').mkdir()
+    assert complete_path(str(cdir / 'alph')).endswith('alpha')  # common prefix
+    assert complete_path(str(cdir / 'alphabet')).endswith('alphabet.txt')
+    assert complete_path(str(cdir / 'be')).endswith('beta' + os.sep)  # dirs get a sep
+    assert complete_path(str(cdir / 'zzz')) == str(cdir / 'zzz')  # no match: unchanged
+
     # updater basics: version compare and platform asset selection
     assert up.parse_version('v1.2.3') == (1, 2, 3)
     assert up.is_newer('v99.0.0') and not up.is_newer('v0.0.1') and not up.is_newer('')
@@ -707,8 +739,56 @@ async def phase9():
     print('phase 9 (selection mode): ok')
 
 
+# --- phase 10: compose formatting + attachments ----------------------------------
+async def phase10():
+    from tuimail.app import ComposeScreen, FilePickScreen
+    attach_src = Path(TMP) / 'report.txt'
+    attach_src.write_text('quarterly numbers', encoding='utf-8')
+    app = TuiMail()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await demo_login(pilot)
+        await pilot.press('c')
+        await pilot.pause()
+        assert isinstance(app.screen, ComposeScreen)
+        compose = app.screen
+        compose.query_one('#to', Input).value = 'x@y.z'
+        compose.query_one('#subject', Input).value = 'formatted'
+
+        # formatting keys wrap / insert markers
+        body = compose.query_one('#body', TextArea)
+        body.focus()
+        await pilot.pause()
+        await pilot.press('ctrl+b')
+        assert body.text == '****'
+        body.insert('bold')
+        await pilot.press('ctrl+k')
+        assert '[link text](https://)' in body.text
+
+        # attach via the picker's path input (Tab completion + Enter)
+        await pilot.press('ctrl+o')
+        await pilot.pause()
+        assert isinstance(app.screen, FilePickScreen)
+        path_input = app.screen.query_one('#path', Input)
+        path_input.value = str(Path(TMP) / 'repo')
+        await pilot.press('tab')  # completes to report.txt
+        assert path_input.value.endswith('report.txt')
+        await pilot.press('enter')
+        await pilot.pause()
+        assert isinstance(app.screen, ComposeScreen)
+        assert compose.attachments and compose.attachments[0].name == 'report.txt'
+        assert be.load_config().get('last_attach_dir') == str(attach_src.parent)
+
+        await pilot.press('ctrl+s')
+        await settle(pilot)
+        sent = app.session.account('personal').backend.outbox[-1]
+        atts = be.attachments_of(sent)
+        assert atts and atts[0][0] == 'report.txt' and atts[0][1] == b'quarterly numbers'
+        assert sent.get_body(preferencelist=('html',)) is not None  # markup -> html part
+    print('phase 10 (compose formatting/attachments): ok')
+
+
 PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5,
-          '6': phase6, '7': phase7, '8': phase8, '9': phase9}
+          '6': phase6, '7': phase7, '8': phase8, '9': phase9, '10': phase10}
 
 
 async def main():

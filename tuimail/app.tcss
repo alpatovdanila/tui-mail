@@ -160,6 +160,26 @@ OnboardingScreen, AccountFormScreen, AccountsScreen, LoginScreen {
     margin: 0;
 }
 
+FilePickScreen {
+    align: center middle;
+    background: $background 60%;
+}
+#filepick-card {
+    width: 84;
+    height: 28;
+    padding: 1 2;
+    border: round $accent;
+    background: $panel;
+}
+#ftree {
+    height: 1fr;
+    background: transparent;
+}
+#attach-line {
+    display: none;
+    padding: 0 1;
+}
+
 /* ---- compose --------------------------------------------------------------- */
 ComposeScreen #body {
     height: 1fr;
