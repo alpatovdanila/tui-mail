@@ -352,14 +352,14 @@ class LoginScreen(Screen):
                 yield Button('Sign in', variant='primary', id='signin',
                              disabled=not self._accounts)
                 yield Button('Demo mailbox', id='demo')
-                yield Button('Manage accounts', id='accounts')
+                yield Button('Manage accounts', id='manage')
             yield Static('', id='login-status')
 
     def on_button_pressed(self, event):
         if event.button.id == 'demo':
             self.app.session = be.demo_session()
             self.app.switch_screen(MainScreen())
-        elif event.button.id == 'accounts':
+        elif event.button.id == 'manage':
             self.app.switch_screen(
                 AccountsScreen() if self._accounts else AccountFormScreen(None))
         elif event.button.id == 'signin':

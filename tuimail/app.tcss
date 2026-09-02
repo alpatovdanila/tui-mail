@@ -2,21 +2,34 @@
 Screen {
     background: $background;
 }
-/* Textual's default tall/line borders use block-element glyphs that macOS
-   Terminal draws with gaps (broken dashed look) — use box-drawing borders */
+/* Textual's default widget chrome (tall/line borders + surface slabs) renders
+   with gaps in macOS Terminal and fights round borders. Own the look instead:
+   transparent fields outlined directly on the card, outline-style buttons. */
 Input, TextArea, SelectCurrent, Checkbox {
+    background: transparent;
     border: round $primary 40%;
 }
 Input:focus, TextArea:focus, Checkbox:focus, Select:focus SelectCurrent {
     border: round $accent;
+    background: $boost;
 }
 Button {
     margin: 1 2 0 0;
-    border: round $primary 40% !important;  /* variants re-declare tall borders */
+    background: transparent !important;  /* variants re-declare chrome */
+    border: round $primary 40% !important;
+    text-style: bold;
 }
 Button:focus {
     border: round $accent !important;
-    text-style: bold;
+    background: $accent 20% !important;
+}
+Button.-primary {
+    color: $accent;
+    border: round $accent 60% !important;
+}
+Button.-error {
+    color: $error;
+    border: round $error 60% !important;
 }
 .hint {
     color: $text-muted;

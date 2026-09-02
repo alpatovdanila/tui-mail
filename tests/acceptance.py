@@ -464,7 +464,7 @@ async def phase6():
     app = TuiMail()
     async with app.run_test(size=(120, 40)) as pilot:
         assert isinstance(app.screen, LoginScreen)
-        await pilot.click('#accounts')
+        await pilot.click('#manage')
         await pilot.pause()
         assert isinstance(app.screen, AccountsScreen)
 
