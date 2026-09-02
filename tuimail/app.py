@@ -14,8 +14,8 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (Button, Checkbox, DataTable, Footer, Header,
-                             Input, Label, ListItem, ListView, OptionList,
-                             Select, Static, TextArea)
+                             Input, Label, ListItem, ListView, Markdown,
+                             OptionList, Select, Static, TextArea)
 
 from . import backend as be
 from .backend import nice_date
@@ -914,12 +914,14 @@ class ReaderScreen(Screen):
         super().__init__()
         self.summary, self.msg, self.main = summary, msg, main
         self.body_text = be.body_of(msg)
+        self.markdown_source = be.body_markdown(msg)
         self.account_line = ''
 
     def compose(self):
         yield Header()
         with VerticalScroll(id='reader-scroll'):
             yield Static(id='reader-body')
+            yield Markdown(id='reader-md')
         yield Footer()
 
     def on_mount(self):
@@ -947,10 +949,25 @@ class ReaderScreen(Screen):
             extras.append(f'🔗 {len(links)} link(s) — press o to open')
         if extras:
             t.append('\n' + '\n'.join(extras) + '\n', style='italic cyan')
-        t.append('\n' + '─' * 72 + '\n\n', style='dim')
-        t.append(self.body_text)
+        t.append('\n' + '─' * 72 + '\n', style='dim')
+        md = self.query_one('#reader-md', Markdown)
+        if self.markdown_source:
+            md.update(self.markdown_source)
+        else:
+            md.display = False
+            t.append('\n')
+            t.append(self.body_text)
         self.query_one('#reader-body', Static).update(t)
         self.query_one('#reader-scroll', VerticalScroll).focus()
+
+    def on_markdown_link_clicked(self, event):
+        href = str(getattr(event, 'href', '') or '')
+        event.prevent_default()
+        if href.startswith(('http://', 'https://')):
+            webbrowser.open(href)
+            self.app.notify(f'Opened {href[:60]}')
+        else:
+            self.app.notify('Only web links can be opened', severity='warning')
 
     def action_back(self):
         self.app.pop_screen()

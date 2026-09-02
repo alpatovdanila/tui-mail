@@ -146,6 +146,11 @@ OnboardingScreen, AccountFormScreen, AccountsScreen, LoginScreen {
 #reader-scroll {
     padding: 1 2;
 }
+#reader-md {
+    background: transparent;
+    padding: 0;
+    margin: 0;
+}
 
 /* ---- compose --------------------------------------------------------------- */
 ComposeScreen #body {

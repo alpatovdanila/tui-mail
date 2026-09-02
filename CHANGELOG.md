@@ -4,6 +4,16 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.5.0 — 2026-09-02
+
+### Added
+- **Real HTML mail rendering**: messages with an HTML part now render with
+  headings, bold/italic, lists, tables, blockquotes, and clickable links
+  (opened in your browser; only http/https links are ever opened). Powered by
+  markdownify (MIT) + Textual's Markdown widget; plain-text messages and the
+  preview pane keep the fast text path, and anything unconvertible falls back
+  to it.
+
 ## 1.4.0 — 2026-09-02
 
 From first real-world macOS field testing — thanks for the feedback:

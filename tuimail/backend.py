@@ -240,6 +240,26 @@ def body_of(msg) -> str:
     return sanitize(text)
 
 
+def body_markdown(msg) -> str | None:
+    """HTML part -> Markdown for rich reader rendering; None when there's no
+    HTML part or conversion is unavailable (caller falls back to body_of)."""
+    part = msg.get_body(preferencelist=('html',))
+    if part is None or part.get_content_type() != 'text/html':
+        return None
+    try:
+        src = part.get_content()
+    except Exception:
+        src = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace')
+    src = re.sub(r'(?is)<(script|style)\b.*?(?:</\1\s*>|\Z)', '', src[:2_000_000])
+    try:
+        from markdownify import markdownify
+        md = markdownify(src, heading_style='ATX', strip=['script', 'style'])
+    except Exception:
+        return None
+    md = re.sub(r'\n{3,}', '\n\n', md).strip()
+    return sanitize(md)
+
+
 URL_RE = re.compile(r'https?://[^\s<>"\')\]]+')
 
 
@@ -697,7 +717,9 @@ def _demo_data(flavor='home', address='you@tuimail.demo'):
                            hours=9, attach=('packing-list.txt', b'passport\nchargers\nadapter\nsunscreen\n')),
              unread=False, flagged=True),
         dict(msg=_demo_msg('GitHub <noreply@github.com>', '[tuimail] Your build passed',
-                           '<html><body><p>Build <b>#42</b> passed on <i>main</i>.</p>'
+                           '<html><body><h2>CI report</h2>'
+                           '<p>Build <b>#42</b> passed on <i>main</i>.</p>'
+                           '<ul><li>214 checks green</li><li>artifacts published</li></ul>'
                            '<p><a href="https://github.com">View run</a></p>'
                            '<style>p{color:red}</style></body></html>',
                            html=True, hours=14), unread=True, flagged=False),

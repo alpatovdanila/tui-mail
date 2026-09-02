@@ -154,6 +154,18 @@ def helpers():
     ctx = captured['ctx']
     assert ctx is not None and ctx.verify_mode == _ssl.CERT_REQUIRED and ctx.check_hostname
 
+    # HTML mail converts to markdown for the reader (headings, bold, links kept)
+    rich_html = email.message_from_bytes(
+        b'Content-Type: text/html\r\n\r\n<h1>T</h1><p><b>bold</b> '
+        b'<a href="https://x.y">link</a></p><script>bad()</script>',
+        policy=email.policy.default)
+    md_out = be.body_markdown(rich_html)
+    assert md_out and '# T' in md_out and '**bold**' in md_out
+    assert '[link](https://x.y)' in md_out and 'bad()' not in md_out
+    plain_only = email.message_from_bytes(
+        b'Content-Type: text/plain\r\n\r\njust text\r\n', policy=email.policy.default)
+    assert be.body_markdown(plain_only) is None
+
     # gmail labels in non-Latin scripts (IMAP modified UTF-7) decode for display
     assert be.decode_folder('&BB8EQAQ4BDIENQRC-') == 'Привет'
     assert be.decode_folder('INBOX') == 'INBOX'
@@ -347,6 +359,9 @@ async def phase3():
         assert isinstance(reader, ReaderScreen)
         assert 'Build #42 passed' in reader.body_text.replace('\n', ' ')
         assert '<' not in reader.body_text
+        # HTML mail renders through the Markdown widget
+        assert reader.markdown_source and '## CI report' in reader.markdown_source
+        assert reader.query_one('#reader-md').display
         assert unread_total(app) == before - 1  # opening marks read
         await pilot.press('escape')
         await pilot.pause()
