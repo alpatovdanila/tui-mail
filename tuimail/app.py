@@ -49,9 +49,10 @@ HELP_ROWS = [
     ('0 1 2 …', 'all accounts · account 1, 2 …'),
     ('c / r', 'compose / reply'),
     ('u / s', 'toggle unread / star'),
-    ('d', 'delete'),
+    ('d / z', 'delete (to Trash) / undo within 5 s'),
+    ('m / A', 'move to a folder / archive'),
     ('/', 'search this folder (Esc clears)'),
-    ('R', 'refresh'),
+    ('R / L', 'refresh / load older messages'),
     ('', ''),
     ('Compose', ''),
     ('Ctrl+S / Esc', 'send / cancel'),
@@ -61,7 +62,9 @@ HELP_ROWS = [
     ('Reader', ''),
     ('j k Space b', 'scroll / page down / page up'),
     ('g G Ctrl+D Ctrl+U', 'top / bottom / half page'),
-    ('o / a', 'links / save attachments'),
+    ('n / p', 'next / previous message'),
+    ('u s m d', 'unread / star / move / delete'),
+    ('o / a', 'links / attachments'),
     ('q / Esc', 'back'),
     ('', ''),
     ('Anywhere', ''),
@@ -230,20 +233,87 @@ class LinksScreen(ModalScreen):
 
     def __init__(self, links):
         super().__init__()
-        self.links = links
+        self.links = links  # [(text, url)]
 
     def compose(self):
         with Vertical(id='links-card'):
             yield Label('Links — Enter opens in your browser, Esc closes', classes='card-title')
-            yield OptionList(*self.links, id='linklist')
+            yield OptionList(*[Text.assemble((t, 'bold'), ('  ' + u, 'dim')) if t else Text(u)
+                               for t, u in self.links], id='linklist')
 
     def on_mount(self):
         self.query_one(OptionList).focus()
 
     def on_option_list_option_selected(self, event):
-        url = self.links[event.option_index]
+        url = self.links[event.option_index][1]
         webbrowser.open(url)
         self.app.notify(f'Opened {url[:60]}')
+
+    def action_close(self):
+        self.dismiss()
+
+
+class FolderPickScreen(ModalScreen):
+    BINDINGS = [Binding('escape,q', 'close', 'Cancel')]
+
+    def __init__(self, folders, title='Move to folder'):
+        super().__init__()
+        self.folders = folders  # raw IMAP names; displayed decoded
+        self.title_text = title
+
+    def compose(self):
+        with Vertical(id='links-card'):
+            yield Label(f'{self.title_text} — Enter picks, Esc cancels', classes='card-title')
+            yield OptionList(*[be.decode_folder(f) for f in self.folders], id='folderlist')
+
+    def on_mount(self):
+        self.query_one(OptionList).focus()
+
+    def on_option_list_option_selected(self, event):
+        self.dismiss(self.folders[event.option_index])
+
+    def action_close(self):
+        self.dismiss(None)
+
+
+def save_attachment(name, data):
+    """Write to Downloads without clobbering; returns the path."""
+    dest = be.downloads_dir()
+    dest.mkdir(parents=True, exist_ok=True)
+    p = dest / name
+    i = 1
+    while p.exists():
+        p = dest / f'{Path(name).stem} ({i}){Path(name).suffix}'
+        i += 1
+    p.write_bytes(data)
+    return p
+
+
+class AttachmentsScreen(ModalScreen):
+    BINDINGS = [Binding('escape,q', 'close', 'Close'),
+                Binding('a', 'save_all', 'Save all')]
+
+    def __init__(self, atts):
+        super().__init__()
+        self.atts = atts  # [(name, bytes)]
+
+    def compose(self):
+        with Vertical(id='links-card'):
+            yield Label('Attachments — Enter saves one to Downloads, a saves all, Esc closes',
+                        classes='card-title')
+            yield OptionList(*[f'{n}  ({max(1, len(d) // 1024)} KB)' for n, d in self.atts],
+                             id='attlist')
+
+    def on_mount(self):
+        self.query_one(OptionList).focus()
+
+    def on_option_list_option_selected(self, event):
+        name, data = self.atts[event.option_index]
+        self.app.notify(f'Saved {save_attachment(name, data)}')
+
+    def action_save_all(self):
+        saved = [save_attachment(n, d).name for n, d in self.atts]
+        self.app.notify(f'Saved to {be.downloads_dir()}: {", ".join(saved)}')
 
     def action_close(self):
         self.dismiss()
@@ -629,6 +699,10 @@ class MainScreen(Screen):
         Binding('c', 'compose', 'Compose'),
         Binding('r', 'reply', 'Reply'),
         Binding('d', 'delete', 'Delete'),
+        Binding('z', 'undo_delete', 'Undo', show=False),
+        Binding('m', 'move_to', 'Move'),
+        Binding('A', 'archive', 'Archive', show=False),
+        Binding('L', 'load_older', 'Older', show=False),
         Binding('u', 'toggle_read', 'Read/unread', show=False),
         Binding('s', 'toggle_flag', 'Star', show=False),
         Binding('space', 'toggle_select', 'Select', show=False),
@@ -671,6 +745,8 @@ class MainScreen(Screen):
         self._pv_timer = None
         self._preview_key = None  # (account, uid) currently shown in the preview
         self._seq = 0  # bumped on every optimistic local change; stale loads are dropped
+        self.per_account = {}  # {account: {folder: unread}}
+        self._pending = []  # deletes inside their undo window: (summary, index, folder, timer)
         table = self.query_one('#msgtable', DataTable)
         table.cursor_type = 'row'
         table.cursor_background_priority = 'css'  # cursor stays visible over selection tint
@@ -708,14 +784,18 @@ class MainScreen(Screen):
     @work(thread=True, exclusive=True, group='load')
     def _load_all(self, focus=False):
         app = self.app
-        seq, scope, folder = self._seq, self.scope, self.folder
+        seq, scope, requested = self._seq, self.scope, self.folder
+        folder = requested
         try:
-            counts = app.session.folders(scope)
+            counts, per_account = app.session.folders_detailed(scope)
+            if folder not in {n for n, _ in counts}:
+                folder = 'INBOX'  # this scope has no such folder — fall back
             msgs = app.session.list_messages(folder, scope)
         except Exception as exc:
             app.call_from_thread(self._load_failed, exc)
             return
-        app.call_from_thread(self._loaded, counts, msgs, seq, scope, folder, focus)
+        app.call_from_thread(self._loaded, counts, per_account, msgs, seq, scope,
+                             requested, folder, focus)
 
     @work(thread=True, exclusive=True, group='load')
     def _load_folder(self, folder):
@@ -734,14 +814,19 @@ class MainScreen(Screen):
         self.app.notify(str(exc), severity='error', title='Mail')
 
     @ui_callback
-    def _loaded(self, counts, msgs, seq, scope, folder, focus):
+    def _loaded(self, counts, per_account, msgs, seq, scope, requested, folder, focus):
         table = self.query_one('#msgtable', DataTable)
-        if seq != self._seq or scope != self.scope or folder != self.folder:
+        if seq != self._seq or scope != self.scope or requested != self.folder:
             return  # stale snapshot; leave the spinner to the load that superseded us
+        if folder != requested:
+            self.folder = folder  # the scope had no such folder; INBOX it is
         table.loading = False
         self.folder_counts = counts
+        self.per_account = per_account
         self._cache.clear()
-        self.all_msgs = msgs
+        pending = {(s.account, s.uid) for s, _, _, _ in self._pending}
+        self.all_msgs = [m for m in msgs if (m.account, m.uid) not in pending]
+        self.update_accounts()
         self.update_sidebar()
         self.apply_filter(keep_cursor=True)
         if focus:
@@ -773,9 +858,17 @@ class MainScreen(Screen):
         session = self.app.session
         rows = []
         if len(session.accounts) > 1:
-            rows.append((None, Text.assemble(('● ', 'dim'), 'All accounts')))
+            label = Text.assemble(('● ', 'dim'), 'All accounts')
+            total = sum(pa.get('INBOX', 0) for pa in self.per_account.values())
+            if total:
+                label.append(f'  {total}', 'bold cyan')
+            rows.append((None, label))
         for a in session.accounts:
-            rows.append((a.name, account_label(a.name, a.color)))
+            label = account_label(a.name, a.color)
+            unread = self.per_account.get(a.name, {}).get('INBOX', 0)
+            if unread:
+                label.append(f'  {unread}', 'bold cyan')
+            rows.append((a.name, label))
         idx = 0
         for i, (value, label) in enumerate(rows):
             marker = Text('▸ ' if value == self.scope else '  ')
@@ -1000,6 +1093,7 @@ class MainScreen(Screen):
         """Folder/scope is changing: drop search and selection. Selection keys are
         (account, uid) and IMAP uids are only unique per folder — a surviving
         selection could target unrelated mail in the next folder."""
+        self._flush_pending()
         self.filter_uids = None
         self.selected.clear()
         self.update_selection_ui()
@@ -1011,8 +1105,7 @@ class MainScreen(Screen):
     def set_scope(self, scope):
         if scope == self.scope:
             return
-        self.scope = scope
-        self.folder = 'INBOX'
+        self.scope = scope  # the folder is kept when the new scope has it
         self._leave_view()
         self.update_accounts()
         self._load_all(True)
@@ -1138,8 +1231,8 @@ class MainScreen(Screen):
         account = self.scope or (s.account if s else None)
         self.app.push_screen(ComposeScreen({'account': account}))
 
-    def action_toggle_read(self):
-        if not self._table_focused():
+    def action_toggle_read(self, force=False):
+        if not force and not self._table_focused():
             return
         targets = self._selected_msgs() or ([self.current()] if self.current() else [])
         if not targets:
@@ -1161,8 +1254,8 @@ class MainScreen(Screen):
         self._adjust_unread(folder, len(changed) if make_unread else -len(changed))
         self.rebuild_table(keep_cursor=True)
 
-    def action_toggle_flag(self):
-        if not self._table_focused():
+    def action_toggle_flag(self, force=False):
+        if not force and not self._table_focused():
             return
         targets = self._selected_msgs() or ([self.current()] if self.current() else [])
         if not targets:
@@ -1183,8 +1276,8 @@ class MainScreen(Screen):
         self._io(store, reload=len(ops) > 1)
         self.rebuild_table(keep_cursor=True)
 
-    def action_delete(self):
-        if not self._table_focused():
+    def action_delete(self, force=False):
+        if not force and not self._table_focused():
             return
         targets = self._selected_msgs()
         if targets:
@@ -1193,10 +1286,106 @@ class MainScreen(Screen):
                 lambda ok: self.do_delete_many(targets) if ok else None)
             return
         s = self.current()
-        if not s:
+        if s:
+            self.do_delete(s)  # single delete: no confirm, an undo window instead
+
+    # -- move / archive --
+    def _targets(self):
+        return self._selected_msgs() or ([self.current()] if self.current() else [])
+
+    def action_move_to(self, force=False):
+        if not force and not self._table_focused():
             return
-        self.app.push_screen(ConfirmScreen(f'Delete "{s.subject[:48]}"?'),
-                             lambda ok: self.do_delete(s) if ok else None)
+        targets = self._targets()
+        names = [n for n, _ in self.folder_counts if n != self.folder]
+        if not targets or not names:
+            return
+        self.app.push_screen(FolderPickScreen(names),
+                             lambda dest: self.do_move(targets, dest) if dest else None)
+
+    def action_archive(self, force=False):
+        if not force and not self._table_focused():
+            return
+        targets = self._targets()
+        if targets:
+            self.do_move(targets, None, archive=True)
+
+    def do_move(self, targets, dest, archive=False):
+        session, folder = self.app.session, self.folder
+        known = getattr(session, '_folder_names', {})
+        plan, skipped = [], 0
+        for s in targets:
+            d = session.special_folder(s.account, 'archive') if archive else dest
+            if not d or (s.account in known and d not in known[s.account]):
+                skipped += 1  # this account has no such folder
+                continue
+            plan.append((s, d))
+        if not plan:
+            self.app.notify('No Archive folder for this account' if archive
+                            else 'That folder does not exist for these messages',
+                            severity='warning')
+            return
+        self._seq += 1
+        ops = [(s.account, s.uid, d) for s, d in plan]
+
+        def mv():
+            failed = 0
+            for account, uid, d in ops:
+                try:
+                    session.move(account, folder, uid, d)
+                except Exception:
+                    failed += 1
+            if failed:
+                raise RuntimeError(f'{failed} of {len(ops)} moves failed — refresh (R)')
+        self._io(mv, reload=True)
+        unread_gone = 0
+        for s, _ in plan:
+            if s in self.all_msgs:
+                self.all_msgs.remove(s)
+            self._cache.pop((s.account, folder, s.uid), None)
+            unread_gone += s.unread
+        if unread_gone:
+            self._adjust_unread(folder, -unread_gone)
+        self.selected.clear()
+        self.apply_filter(keep_cursor=True)
+        what = 'Archived' if archive else f'Moved to {be.decode_folder(plan[0][1])}'
+        self.app.notify(f'{what}: {len(plan)}'
+                        + (f' · {skipped} skipped (no such folder)' if skipped else ''))
+
+    # -- load older --
+    def action_load_older(self):
+        mins = {}
+        for s in self.all_msgs:
+            if s.uid.isdigit():
+                mins[s.account] = min(mins.get(s.account, int(s.uid)), int(s.uid))
+        if not mins:
+            self.app.notify('No older messages to load')
+            return
+        self.app.notify('Loading older messages …', timeout=3)
+        self._older(self.folder, self.scope, {a: str(u) for a, u in mins.items()})
+
+    @work(thread=True, exclusive=True, group='load')
+    def _older(self, folder, scope, mins):
+        app = self.app
+        try:
+            msgs = app.session.list_older(folder, scope, mins)
+        except Exception as exc:
+            app.call_from_thread(self._load_failed, exc)
+            return
+        app.call_from_thread(self._older_loaded, folder, scope, msgs)
+
+    @ui_callback
+    def _older_loaded(self, folder, scope, msgs):
+        if folder != self.folder or scope != self.scope:
+            return
+        have = {(s.account, s.uid) for s in self.all_msgs}
+        new = [m for m in msgs if (m.account, m.uid) not in have]
+        if not new:
+            self.app.notify('No older messages')
+            return
+        self.all_msgs.extend(new)
+        self.apply_filter(keep_cursor=True)
+        self.app.notify(f'Loaded {len(new)} older message(s)')
 
     def do_delete_many(self, targets):
         self._seq += 1
@@ -1226,15 +1415,49 @@ class MainScreen(Screen):
         self.app.notify(f'Deleted {len(targets)}')
 
     def do_delete(self, s):
-        self._seq += 1
-        self._io(partial(self.app.session.delete, s.account, self.folder, s.uid))
+        """Optimistic single delete with a 5 s undo window; the server call runs
+        when the window closes (or the view changes)."""
+        folder = self.folder
+        index = self.all_msgs.index(s) if s in self.all_msgs else 0
         if s in self.all_msgs:
             self.all_msgs.remove(s)
-        self._cache.pop((s.account, self.folder, s.uid), None)
+        self._cache.pop((s.account, folder, s.uid), None)
         if s.unread:
-            self._adjust_unread(self.folder, -1)
+            self._adjust_unread(folder, -1)
+        self._seq += 1  # a poll landing now must not resurrect the row
+        timer = self.set_timer(5, partial(self._commit_delete, s))
+        self._pending.append((s, index, folder, timer))
         self.apply_filter(keep_cursor=True)
-        self.app.notify('Deleted')
+        self.app.notify('Deleted — z undoes within 5 s', timeout=5)
+
+    def _commit_delete(self, s):
+        for item in list(self._pending):
+            if item[0] is s:
+                self._pending.remove(item)
+                self._io(partial(self.app.session.delete, s.account, item[2], s.uid))
+                return
+
+    def _flush_pending(self):
+        for s, _, folder, timer in self._pending:
+            timer.stop()
+            self._io(partial(self.app.session.delete, s.account, folder, s.uid))
+        self._pending.clear()
+
+    def action_undo_delete(self):
+        if not self._pending:
+            self.app.notify('Nothing to undo')
+            return
+        s, index, folder, timer = self._pending.pop()
+        timer.stop()
+        self.all_msgs.insert(min(index, len(self.all_msgs)), s)
+        if s.unread:
+            self._adjust_unread(folder, 1)
+        self._seq += 1
+        self.apply_filter(keep_cursor=True)
+        row = next((i for i, m in enumerate(self.view) if m is s), None)
+        if row is not None:
+            self.query_one('#msgtable', DataTable).move_cursor(row=row)  # cursor on the restored mail
+        self.app.notify(f'Restored "{s.subject[:40]}"')
 
     def action_refresh(self):
         self.query_one('#msgtable', DataTable).loading = True
@@ -1305,14 +1528,24 @@ class MainScreen(Screen):
 class ReaderScreen(Screen):
     BINDINGS = [
         Binding('q,escape', 'back', 'Back'),
+        Binding('n', 'next_msg', 'Next'),
+        Binding('p', 'prev_msg', 'Prev'),
         Binding('r', 'reply', 'Reply'),
         Binding('o', 'links', 'Links'),
-        Binding('a', 'attachments', 'Save attachments'),
+        Binding('a', 'attachments', 'Attachments'),
+        Binding('m', 'move', 'Move'),
         Binding('d', 'delete', 'Delete'),
+        Binding('u', 'toggle_read', 'Unread', show=False),
+        Binding('s', 'toggle_flag', 'Star', show=False),
         Binding('question_mark', 'help', 'Help', key_display='?'),
         Binding('j', 'scroll(3)', 'Down', show=False),
         Binding('k', 'scroll(-3)', 'Up', show=False),
         Binding('space', 'page', 'Page down', show=False),
+        Binding('b', 'pageup', 'Page up', show=False),
+        Binding('g', 'top', 'Top', show=False),
+        Binding('G', 'bottom', 'Bottom', show=False),
+        Binding('ctrl+d', 'half(1)', 'Half down', show=False),
+        Binding('ctrl+u', 'half(-1)', 'Half up', show=False),
     ]
 
     def __init__(self, summary, msg, main):
@@ -1349,9 +1582,9 @@ class ReaderScreen(Screen):
         links = be.extract_links(self.msg)
         extras = []
         if atts:
-            extras.append(f'📎 {len(atts)} attachment(s) — press a to save')
+            extras.append(f'📎 {len(atts)} attachment(s) — press a')
         if links:
-            extras.append(f'🔗 {len(links)} link(s) — press o to open')
+            extras.append(f'🔗 {len(links)} link(s) — press o')
         if extras:
             t.append('\n' + '\n'.join(extras) + '\n', style='italic cyan')
         t.append('\n' + '─' * 72 + '\n', style='dim')
@@ -1394,35 +1627,69 @@ class ReaderScreen(Screen):
         if not atts:
             self.app.notify('No attachments in this message')
             return
-        dest = be.downloads_dir()
-        dest.mkdir(parents=True, exist_ok=True)
-        saved = []
-        for name, data in atts:
-            p = dest / name
-            i = 1
-            while p.exists():
-                p = dest / f'{Path(name).stem} ({i}){Path(name).suffix}'
-                i += 1
-            p.write_bytes(data)
-            saved.append(p.name)
-        self.app.notify(f'Saved to {dest}: {", ".join(saved)}')
+        self.app.push_screen(AttachmentsScreen(atts))
 
     def action_delete(self):
-        def done(ok):
-            if ok:
-                self.main.do_delete(self.summary)
+        self.main.do_delete(self.summary)  # z in the mailbox undoes within 5 s
+        self.app.pop_screen()
+
+    def action_move(self):
+        main = self.main
+        names = [n for n, _ in main.folder_counts if n != main.folder]
+
+        def done(dest):
+            if dest:
+                main.do_move([self.summary], dest)
                 self.app.pop_screen()
-        self.app.push_screen(
-            ConfirmScreen(f'Delete "{self.summary.subject[:48]}"?'), done)
+        self.app.push_screen(FolderPickScreen(names), done)
+
+    def action_toggle_read(self):
+        self.main.action_toggle_read(force=True)
+
+    def action_toggle_flag(self):
+        self.main.action_toggle_flag(force=True)
+
+    def _step(self, delta):
+        main = self.main
+        table = main.query_one('#msgtable', DataTable)
+        row = table.cursor_row + delta
+        if not (0 <= row < len(main.view)):
+            self.app.notify('No more messages in this direction')
+            return
+        table.move_cursor(row=row)
+        self.app.pop_screen()
+        main._open(main.view[row], main.folder)
+
+    def action_next_msg(self):
+        self._step(1)
+
+    def action_prev_msg(self):
+        self._step(-1)
 
     def action_help(self):
         self.app.push_screen(HelpScreen())
 
+    def _scroller(self):
+        return self.query_one('#reader-scroll', VerticalScroll)
+
     def action_scroll(self, dy):
-        self.query_one('#reader-scroll', VerticalScroll).scroll_relative(y=dy, animate=False)
+        self._scroller().scroll_relative(y=dy, animate=False)
 
     def action_page(self):
-        self.query_one('#reader-scroll', VerticalScroll).scroll_page_down(animate=False)
+        self._scroller().scroll_page_down(animate=False)
+
+    def action_pageup(self):
+        self._scroller().scroll_page_up(animate=False)
+
+    def action_top(self):
+        self._scroller().scroll_home(animate=False)
+
+    def action_bottom(self):
+        self._scroller().scroll_end(animate=False)
+
+    def action_half(self, direction):
+        sc = self._scroller()
+        sc.scroll_relative(y=direction * max(1, sc.size.height // 2), animate=False)
 
 
 # --- compose ------------------------------------------------------------------
@@ -1611,11 +1878,16 @@ class MailCommands(Provider):
         session = self.app.session
         commands = [
             ('Compose new message', screen.action_compose),
+            ('Move to folder…', partial(screen.action_move_to, True)),
+            ('Archive', partial(screen.action_archive, True)),
+            ('Load older messages', screen.action_load_older),
             ('Refresh mailbox', screen.action_refresh),
             ('Search messages', screen.action_search),
             ('Keyboard reference', screen.action_help),
             ('Logout', self.app.action_logout),
         ]
+        if screen._pending:
+            commands.insert(1, ('Undo delete', screen.action_undo_delete))
         if self.app.update_info:
             commands.append((f'Install update {self.app.update_info["version"]}',
                              self.app.action_update_app))

@@ -324,7 +324,12 @@ def helpers():
 
     assert be.extract_links(email.message_from_bytes(
         b'Content-Type: text/plain\r\n\r\nsee https://example.com/x. and http://a.b\r\n',
-        policy=email.policy.default)) == ['https://example.com/x', 'http://a.b']
+        policy=email.policy.default)) == [('', 'https://example.com/x'), ('', 'http://a.b')]
+    # html: anchors carry their text; image sources and tracking pixels are not links
+    assert be.extract_links(email.message_from_bytes(
+        b'Content-Type: text/html\r\n\r\n<a href="https://u.x/unsub">Unsubscribe</a>'
+        b'<img src="https://px.example/1x1.gif"><a href="https://u.x/unsub">dup</a>',
+        policy=email.policy.default)) == [('Unsubscribe', 'https://u.x/unsub')]
     print('phase 0 (helpers): ok')
 
 
@@ -417,14 +422,13 @@ async def phase2():
         await settle(pilot)
         assert app.screen.view[0].flagged
 
-        await pilot.press('d')
+        await pilot.press('d')  # single delete: immediate, with an undo window
         await pilot.pause()
-        await pilot.press('n')  # decline -> nothing deleted
+        assert table(app).row_count == n - 1
+        await pilot.press('z')  # undo restores it
         await pilot.pause()
         assert table(app).row_count == n
         await pilot.press('d')
-        await pilot.pause()
-        await pilot.press('y')
         await settle(pilot)
         assert table(app).row_count == n - 1
 
@@ -527,8 +531,9 @@ async def phase4():
         await pilot.pause()
         links_screen = app.screen
         assert isinstance(links_screen, LinksScreen)
-        assert 'https://textual.textualize.io' in links_screen.links
-        assert 'https://github.com/Textualize/textual' in links_screen.links
+        urls = [u for _, u in links_screen.links]
+        assert 'https://textual.textualize.io' in urls
+        assert 'https://github.com/Textualize/textual' in urls
         await pilot.press('escape')
         await pilot.pause()
 
@@ -541,8 +546,14 @@ async def phase4():
         await settle(pilot)
         await pilot.press('a')
         await pilot.pause()
+        from tuimail.app import AttachmentsScreen
+        assert isinstance(app.screen, AttachmentsScreen)
+        await pilot.press('enter')  # save the highlighted attachment
+        await pilot.pause()
         saved = Path(TMP) / 'packing-list.txt'
         assert saved.exists() and b'passport' in saved.read_bytes()
+        await pilot.press('escape')
+        await pilot.pause()
         await pilot.press('q')
         await pilot.pause()
 
@@ -905,9 +916,108 @@ async def phase11():
     print('phase 11 (P0: help/focus/layout/quit/compose): ok')
 
 
+# --- phase 12: UX-study P1 features ---------------------------------------------
+async def phase12():
+    from textual.widgets import OptionList
+    from tuimail.app import FolderPickScreen
+    app = TuiMail()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await demo_login(pilot)
+        main = app.screen
+        t = table(app)
+        n = t.row_count
+        personal = app.session.account('personal').backend
+
+        # per-account unread counts
+        assert main.per_account['personal']['INBOX'] == 3
+        assert main.per_account['work']['INBOX'] == 1
+
+        # reader: n/p walk the list, u toggles unread from inside
+        await pilot.press('enter')
+        await settle(pilot)
+        first = app.screen.summary
+        await pilot.press('n')
+        await settle(pilot)
+        assert isinstance(app.screen, ReaderScreen) and app.screen.summary is main.view[1]
+        await pilot.press('p')
+        await settle(pilot)
+        assert app.screen.summary is first
+        before = unread_total(app)
+        await pilot.press('u')
+        await settle(pilot)
+        assert unread_total(app) == before + 1  # opened (read) message -> unread again
+        await pilot.press('q')
+        await pilot.pause()
+
+        # delete has an undo window and lands in Trash when committed
+        t.move_cursor(row=0)
+        await pilot.pause()
+        victim = main.current()
+        await pilot.press('d')
+        await pilot.pause()
+        assert t.row_count == n - 1 and main._pending
+        await pilot.press('z')
+        await pilot.pause()
+        assert t.row_count == n and not main._pending and main.current() is victim
+        await pilot.press('d')
+        await pilot.pause()
+        main.goto_folder('Sent')  # leaving the view commits the pending delete
+        await settle(pilot)
+        assert [it['msg']['Subject'] for it in personal._data['Trash']] == [victim.subject]
+        main.goto_folder('INBOX')
+        await settle(pilot)
+
+        # move to a folder via the picker
+        idx = next(i for i, s in enumerate(main.view) if s.account == 'personal')
+        t.move_cursor(row=idx)
+        await pilot.pause()
+        moved = main.current()
+        await pilot.press('m')
+        await pilot.pause()
+        assert isinstance(app.screen, FolderPickScreen)
+        pick = app.screen.query_one(OptionList)
+        pick.highlighted = app.screen.folders.index('Archive')
+        await pilot.press('enter')
+        await settle(pilot)
+        assert isinstance(app.screen, MainScreen)
+        assert any(it['msg']['Subject'] == moved.subject for it in personal._data['Archive'])
+        assert all(s is not moved for s in main.view)
+
+        # archive: works for an account with an Archive folder, refuses otherwise
+        idx = next(i for i, s in enumerate(main.view) if s.account == 'personal')
+        t.move_cursor(row=idx)
+        await pilot.pause()
+        archived = main.current()
+        await pilot.press('A')
+        await settle(pilot)
+        assert any(it['msg']['Subject'] == archived.subject for it in personal._data['Archive'])
+        idx = next(i for i, s in enumerate(main.view) if s.account == 'work')
+        t.move_cursor(row=idx)
+        await pilot.pause()
+        rows = t.row_count
+        await pilot.press('A')  # work has no Archive folder -> nothing happens
+        await settle(pilot)
+        assert t.row_count == rows
+
+        # the folder survives a scope switch when the target scope has it
+        main.goto_folder('Sent')
+        await settle(pilot)
+        main.set_scope('work')
+        await settle(pilot)
+        assert main.folder == 'Sent'
+        main.set_scope(None)
+        await settle(pilot)
+
+        # load older: the demo has none, and that is reported, not crashed
+        await pilot.press('L')
+        await settle(pilot)
+        assert isinstance(app.screen, MainScreen)
+    print('phase 12 (P1: move/archive/undo/reader/counts/older): ok')
+
+
 PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5,
           '6': phase6, '7': phase7, '8': phase8, '9': phase9, '10': phase10,
-          '11': phase11}
+          '11': phase11, '12': phase12}
 
 
 async def main():

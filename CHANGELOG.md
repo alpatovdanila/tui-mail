@@ -4,6 +4,31 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.11.0 — 2026-09-02
+
+The second batch from the usability study (P1) — the daily-driver verbs:
+
+### Added
+- **Move and archive**: `m` picks a folder (works on a selection too, and
+  from the reader), `A` archives to the account's Archive / All Mail. IMAP
+  `MOVE` with a `COPY` fallback for older servers.
+- **Delete goes to Trash and can be undone**: a single `d` no longer asks —
+  the message disappears and `z` brings it back within 5 seconds; when the
+  window closes it moves to the account's Trash (expunged only from Trash
+  itself or on servers without one). Bulk deletes still confirm.
+- **Reader parity**: `n`/`p` next and previous message, `g`/`G`,
+  `Ctrl+D`/`Ctrl+U`, `b`; `u`/`s`/`m`/`d` act on the open message.
+- **Per-account unread counts** next to each account (and a total on "All
+  accounts"); the current folder is kept when you switch scope if the new
+  scope has it.
+- **Links with their text**: `o` lists "Unsubscribe  https://…" instead of
+  bare URLs; image sources and tracking pixels are no longer listed.
+- **Attachment list**: `a` shows names and sizes; Enter saves one, `a` saves
+  all — no accidental duplicates.
+- **Load older messages** with `L` (or the palette) — the newest 100 are no
+  longer a silent ceiling.
+- Palette entries for move, archive, load older, and undo.
+
 ## 1.10.0 — 2026-09-02
 
 The first batch from the six-persona usability study (P0):

@@ -86,16 +86,25 @@ pyinstaller --onefile --console --name tuimail --collect-all textual --add-data 
 
 | Where   | Key | Action |
 |---------|-----|--------|
-| Mailbox | `j` `k` `↑` `↓` / `g` `G` | move / first / last |
+| Mailbox | `j` `k` `↑` `↓` / `g` `G` | move / first / last (j/k follow the focused pane) |
 | Mailbox | `Enter` | read message |
+| Mailbox | `Space` / `Ctrl+A` | select / select all shown — then `d` `u` `s` `m` act in bulk |
 | Mailbox | `c` / `r` | compose / reply |
-| Mailbox | `u` / `s` / `d` | unread / star / delete |
+| Mailbox | `u` / `s` | unread / star |
+| Mailbox | `d` / `z` | delete to Trash / undo within 5 s |
+| Mailbox | `m` / `A` | move to folder / archive |
 | Mailbox | `/` then `Esc` | search, clear |
-| Mailbox | `R` | refresh |
-| Reader  | `j` `k` `Space` | scroll / page |
-| Reader  | `o` / `a` | open links / save attachments |
+| Mailbox | `R` / `L` | refresh / load older messages |
+| Mailbox | `J` `K` / `p` | scroll the preview / hide it |
+| Mailbox | `0` `1` `2` … | all accounts / account 1, 2 … |
+| Reader  | `j` `k` `Space` `b` `g` `G` | scroll, page, top, bottom |
+| Reader  | `n` / `p` | next / previous message |
+| Reader  | `u` `s` `m` `d` | unread / star / move / delete |
+| Reader  | `o` / `a` | links / attachments |
 | Compose | `Ctrl+S` / `Esc` | send / cancel |
-| Anywhere| `Ctrl+P` / `Ctrl+L` / `?` | palette / logout / help |
+| Compose | `Ctrl+B` `Ctrl+E` `Ctrl+K` / `Ctrl+O` | bold, italic, link / attach |
+| Anywhere| `Ctrl+P` / `Ctrl+L` / `?` `F1` | palette / logout / help |
+| Anywhere| `q` / `Ctrl+Q` | quit from the mailbox (asks) / quit now |
 
 ## Security
 

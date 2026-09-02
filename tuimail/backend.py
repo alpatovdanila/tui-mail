@@ -299,19 +299,35 @@ def body_markdown(msg) -> str | None:
 URL_RE = re.compile(r'https?://[^\s<>"\')\]]+')
 
 
-def extract_links(msg) -> list[str]:
-    texts = []
+def extract_links(msg) -> list[tuple[str, str]]:
+    """[(link text, url)] — anchors from HTML with their text (images and
+    tracking pixels skipped), bare URLs from plain text; deduped by url."""
+    seen: dict[str, str] = {}
+
+    def add(text, url):
+        url = sanitize(url, keep_newlines=False).rstrip('.,;:!?')
+        if url.startswith(('http://', 'https://')) and url not in seen:
+            seen[url] = sanitize(' '.join(text.split()), keep_newlines=False)[:80]
+
     for part in msg.walk():
-        if part.get_content_type() in ('text/plain', 'text/html'):
+        ctype = part.get_content_type()
+        if ctype not in ('text/plain', 'text/html'):
+            continue
+        try:
+            content = part.get_content()
+        except Exception:
+            continue
+        if ctype == 'text/html':
             try:
-                texts.append(part.get_content())
+                from bs4 import BeautifulSoup
+                for a in BeautifulSoup(content, 'html.parser').find_all('a', href=True):
+                    add(a.get_text(' ', strip=True), a['href'])
+                continue
             except Exception:
-                pass
-    seen: dict[str, None] = {}
-    for t in texts:
-        for u in URL_RE.findall(t):
-            seen.setdefault(sanitize(u, keep_newlines=False).rstrip('.,;:!?'))
-    return list(seen)
+                pass  # fall through to bare-URL scan
+        for u in URL_RE.findall(content):
+            add('', u)
+    return [(text, url) for url, text in seen.items()]
 
 
 def attachments_of(msg) -> list[tuple[str, bytes]]:
@@ -553,11 +569,15 @@ class ImapBackend:
             return out
         return self._retry(go)
 
-    def list_messages(self, folder, limit=100):
+    def list_messages(self, folder, limit=100, before_uid=None):
+        """Newest `limit` messages; with before_uid, the `limit` older than it."""
         def go():
             self._select(folder)
             typ, d = self._conn.uid('search', None, 'ALL')
-            uids = (d[0] or b'').split()[-limit:]
+            uids = (d[0] or b'').split()
+            if before_uid is not None:
+                uids = [u for u in uids if u.isdigit() and int(u) < int(before_uid)]
+            uids = uids[-limit:]
             if not uids:
                 return []
             typ, resp = self._conn.uid(
@@ -596,6 +616,28 @@ class ImapBackend:
                 self._conn.uid('expunge', uid)  # UIDPLUS: expunge only this message
             except imaplib.IMAP4.error:
                 self._conn.expunge()  # ponytail: non-UIDPLUS servers expunge every \Deleted
+        self._retry(go)
+
+    def move(self, folder, uid, dest):
+        if re.search(r'["\r\n]', dest):
+            raise RuntimeError('unsafe folder name')
+
+        def go():
+            self._select(folder)
+            try:
+                typ, _ = self._conn.uid('MOVE', uid, f'"{dest}"')  # RFC 6851
+                if typ == 'OK':
+                    return
+            except imaplib.IMAP4.error:
+                pass
+            typ, _ = self._conn.uid('COPY', uid, f'"{dest}"')  # pre-MOVE servers
+            if typ != 'OK':
+                raise RuntimeError(f'could not copy to {dest}')
+            self._conn.uid('store', uid, '+FLAGS', '\\Deleted')
+            try:
+                self._conn.uid('expunge', uid)
+            except imaplib.IMAP4.error:
+                self._conn.expunge()
         self._retry(go)
 
     def search(self, folder, query):
@@ -664,9 +706,17 @@ class Session:
     def scoped(self, scope):
         return [a for a in self.accounts if scope in (None, a.name)]
 
-    def folders(self, scope=None):
+    SPECIAL = {
+        'trash': ('trash', '[gmail]/trash', '[gmail]/bin', 'bin', 'deleted items',
+                  'deleted messages', 'junk/trash'),
+        'archive': ('archive', 'archives', '[gmail]/all mail', 'all mail'),
+    }
+
+    def folders_detailed(self, scope=None):
+        """-> (merged [(name, unread)], {account: {folder: unread}}); remembers
+        each account's folder names for special-folder lookups."""
         accts = self.scoped(scope)
-        order, merged, last_err = [], {}, None
+        order, merged, per_account, last_err = [], {}, {}, None
         for a in accts:
             try:
                 account_folders = a.backend.folders()
@@ -675,6 +725,9 @@ class Session:
                     raise
                 last_err = exc  # merged view: one dead account must not brick the rest
                 continue
+            per_account[a.name] = dict(account_folders)
+            self._folder_names = getattr(self, '_folder_names', {})
+            self._folder_names[a.name] = [n for n, _ in account_folders]
             for name, unread in account_folders:
                 if name not in merged:
                     order.append(name)
@@ -682,7 +735,40 @@ class Session:
                 merged[name] += unread
         if not merged and last_err is not None:
             raise last_err  # every account failed — that's an outage, not an empty list
-        return [(n, merged[n]) for n in order]
+        return [(n, merged[n]) for n in order], per_account
+
+    def folders(self, scope=None):
+        return self.folders_detailed(scope)[0]
+
+    def special_folder(self, account, kind):
+        """Name of the account's Trash/Archive folder, or None if it has none."""
+        names = getattr(self, '_folder_names', {}).get(account, [])
+        wanted = self.SPECIAL[kind]
+        for n in names:
+            if n.lower() in wanted or decode_folder(n).lower() in wanted:
+                return n
+        return None
+
+    def move(self, account, folder, uid, dest):
+        self.account(account).backend.move(folder, uid, dest)
+
+    def list_older(self, folder, scope, min_uids):
+        """Next page per account: messages older than min_uids[account]."""
+        out = []
+        for a in self.scoped(scope):
+            before = min_uids.get(a.name)
+            if before is None:
+                continue
+            try:
+                msgs = a.backend.list_messages(folder, before_uid=before)
+            except Exception:
+                continue
+            for s in msgs:
+                s.account = a.name
+            out.extend(msgs)
+        out.sort(key=lambda s: s.date or datetime.min.replace(tzinfo=timezone.utc),
+                 reverse=True)
+        return out
 
     def list_messages(self, folder, scope=None):
         accts = self.scoped(scope)
@@ -715,7 +801,13 @@ class Session:
         self.account(account).backend.flag(folder, uid, flagged=flagged)
 
     def delete(self, account, folder, uid):
-        self.account(account).backend.delete(folder, uid)
+        """Delete = move to the account's Trash when it has one (recoverable);
+        deleting from Trash itself, or without a Trash folder, expunges."""
+        trash = self.special_folder(account, 'trash')
+        if trash and folder != trash:
+            self.account(account).backend.move(folder, uid, trash)
+        else:
+            self.account(account).backend.delete(folder, uid)
 
     def search(self, folder, query, scope=None):
         """-> ({(account, uid)}, [account names that need a local fallback])"""
@@ -839,7 +931,7 @@ def _demo_data(flavor='home', address='you@tuimail.demo'):
                            'Finally sorted them: 400 photos, 12 good ones. Classic.', days=40),
              unread=False, flagged=False),
     ]
-    data = {'INBOX': inbox, 'Sent': sent, 'Archive': archive}
+    data = {'INBOX': inbox, 'Sent': sent, 'Archive': archive, 'Trash': []}
     for folder, items in data.items():
         for n, it in enumerate(items):
             it['uid'] = f'{folder[:2].lower()}{n + 1}'
@@ -873,7 +965,9 @@ class DemoBackend:
         return [(name, sum(1 for it in items if it['unread']))
                 for name, items in self._data.items()]
 
-    def list_messages(self, folder, limit=100):
+    def list_messages(self, folder, limit=100, before_uid=None):
+        if before_uid is not None:
+            return []  # the demo mailbox has no older pages
         out = [Summary(uid=it['uid'], sender=_nice_from_msg(it['msg']),
                        subject=str(it['msg'].get('Subject') or '(no subject)'),
                        date=parse_date(it['msg'].get('Date')),
@@ -894,6 +988,14 @@ class DemoBackend:
 
     def delete(self, folder, uid):
         self._data[folder] = [it for it in self._data.get(folder, []) if it['uid'] != uid]
+
+    def move(self, folder, uid, dest):
+        if dest not in self._data:
+            raise RuntimeError(f'no folder {dest}')
+        it = self._find(folder, uid)
+        self._data[folder] = [x for x in self._data[folder] if x is not it]
+        moved = dict(it, uid=f'{dest[:2].lower()}{len(self._data[dest]) + 1}-{uid}')
+        self._data[dest].insert(0, moved)
 
     def search(self, folder, query):
         q = query.lower()
