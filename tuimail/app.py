@@ -5,6 +5,7 @@ import webbrowser
 from functools import partial, wraps
 from pathlib import Path
 
+from rich.markup import escape
 from rich.table import Table as RichTable
 from rich.text import Text
 from textual import work
@@ -264,7 +265,8 @@ class FolderPickScreen(ModalScreen):
     def compose(self):
         with Vertical(id='links-card'):
             yield Label(f'{self.title_text} — Enter picks, Esc cancels', classes='card-title')
-            yield OptionList(*[be.decode_folder(f) for f in self.folders], id='folderlist')
+            # Text, not str: '[Gmail]/Trash' would otherwise be parsed as markup
+            yield OptionList(*[Text(be.decode_folder(f)) for f in self.folders], id='folderlist')
 
     def on_mount(self):
         self.query_one(OptionList).focus()
@@ -301,7 +303,7 @@ class AttachmentsScreen(ModalScreen):
         with Vertical(id='links-card'):
             yield Label('Attachments — Enter saves one to Downloads, a saves all, Esc closes',
                         classes='card-title')
-            yield OptionList(*[f'{n}  ({max(1, len(d) // 1024)} KB)' for n, d in self.atts],
+            yield OptionList(*[Text(f'{n}  ({max(1, len(d) // 1024)} KB)') for n, d in self.atts],
                              id='attlist')
 
     def on_mount(self):
@@ -309,11 +311,11 @@ class AttachmentsScreen(ModalScreen):
 
     def on_option_list_option_selected(self, event):
         name, data = self.atts[event.option_index]
-        self.app.notify(f'Saved {save_attachment(name, data)}')
+        self.app.notify(escape(f'Saved {save_attachment(name, data)}'))
 
     def action_save_all(self):
         saved = [save_attachment(n, d).name for n, d in self.atts]
-        self.app.notify(f'Saved to {be.downloads_dir()}: {", ".join(saved)}')
+        self.app.notify(escape(f'Saved to {be.downloads_dir()}: {", ".join(saved)}'))
 
     def action_close(self):
         self.dismiss()
@@ -397,8 +399,15 @@ class AccountFormScreen(Screen):
         if event.select.id != 'provider' or event.value in (None, Select.BLANK):
             return
         p = be.PROVIDERS[event.value]
-        self.query_one('#imap', Input).value = p['imap']
-        self.query_one('#smtp', Input).value = p['smtp']
+        # fill empty or preset hosts only — a customised host (e.g. a :587 SMTP
+        # port) must survive the provider select being set while editing
+        preset_imap = {q['imap'] for q in be.PROVIDERS.values() if q['imap']}
+        preset_smtp = {q['smtp'] for q in be.PROVIDERS.values() if q['smtp']}
+        imap, smtp = self.query_one('#imap', Input), self.query_one('#smtp', Input)
+        if not imap.value or imap.value in preset_imap:
+            imap.value = p['imap']
+        if not smtp.value or smtp.value in preset_smtp:
+            smtp.value = p['smtp']
         self.query_one('#provider-hint', Static).update(p['hint'])
 
     def on_checkbox_changed(self, event):
@@ -462,7 +471,7 @@ class AccountFormScreen(Screen):
             self.app.notify('Could not write the settings file — check permissions',
                             severity='error')
             return
-        self.app.notify(f'Account {acct["name"]} saved')
+        self.app.notify(escape(f'Account {acct["name"]} saved'))
         self.app.switch_screen(LoginScreen() if len(accts) == 1 else AccountsScreen())
 
 
@@ -747,6 +756,7 @@ class MainScreen(Screen):
         self._seq = 0  # bumped on every optimistic local change; stale loads are dropped
         self.per_account = {}  # {account: {folder: unread}}
         self._pending = []  # deletes inside their undo window: (summary, index, folder, timer)
+        self._inflight = set()  # keys whose server delete is running — never re-listed
         table = self.query_one('#msgtable', DataTable)
         table.cursor_type = 'row'
         table.cursor_background_priority = 'css'  # cursor stays visible over selection tint
@@ -768,7 +778,11 @@ class MainScreen(Screen):
 
     def _apply_layout(self):
         width = self.size.width
-        self.query_one('#sidebar').display = width >= 90  # palette still switches
+        sidebar = self.query_one('#sidebar')
+        sidebar.display = width >= 90  # palette and 0-9 still switch
+        focused = self.app.focused
+        if not sidebar.display and focused is not None and sidebar in focused.ancestors:
+            self.query_one('#msgtable', DataTable).focus()  # never leave focus on a hidden list
         if self.view:
             self.rebuild_table(keep_cursor=True)
 
@@ -824,8 +838,8 @@ class MainScreen(Screen):
         self.folder_counts = counts
         self.per_account = per_account
         self._cache.clear()
-        pending = {(s.account, s.uid) for s, _, _, _ in self._pending}
-        self.all_msgs = [m for m in msgs if (m.account, m.uid) not in pending]
+        hidden = {(s.account, s.uid) for s, _, _, _ in self._pending} | set(self._inflight)
+        self.all_msgs = [m for m in msgs if (m.account, m.uid) not in hidden]
         self.update_accounts()
         self.update_sidebar()
         self.apply_filter(keep_cursor=True)
@@ -940,7 +954,11 @@ class MainScreen(Screen):
         table.add_column('When', width=when_w)
         session = self.app.session
         sel_bg = self._sel_bg()
+        seen = set()
         for s in self.view:
+            if (s.account, s.uid) in seen:
+                continue  # a duplicate key would crash the DataTable; never let it
+            seen.add((s.account, s.uid))
             sel = (s.account, s.uid) in self.selected
             bg = sel_bg if sel else ''
             style = ('bold' if s.unread else '') + bg
@@ -1231,10 +1249,19 @@ class MainScreen(Screen):
         account = self.scope or (s.account if s else None)
         self.app.push_screen(ComposeScreen({'account': account}))
 
-    def action_toggle_read(self, force=False):
+    def _live(self, s):
+        """The list's own object for a summary (the reader may hold a stale one
+        from before a poll); identity is (account, uid), not dataclass equality."""
+        key = (s.account, s.uid)
+        return next((m for m in self.all_msgs if (m.account, m.uid) == key), None)
+
+    def action_toggle_read(self, force=False, target=None):
         if not force and not self._table_focused():
             return
-        targets = self._selected_msgs() or ([self.current()] if self.current() else [])
+        if target is not None:
+            targets = [self._live(target) or target]
+        else:
+            targets = self._selected_msgs() or ([self.current()] if self.current() else [])
         if not targets:
             return
         make_unread = not any(s.unread for s in targets)  # any unread -> read all
@@ -1254,10 +1281,13 @@ class MainScreen(Screen):
         self._adjust_unread(folder, len(changed) if make_unread else -len(changed))
         self.rebuild_table(keep_cursor=True)
 
-    def action_toggle_flag(self, force=False):
+    def action_toggle_flag(self, force=False, target=None):
         if not force and not self._table_focused():
             return
-        targets = self._selected_msgs() or ([self.current()] if self.current() else [])
+        if target is not None:
+            targets = [self._live(target) or target]
+        else:
+            targets = self._selected_msgs() or ([self.current()] if self.current() else [])
         if not targets:
             return
         make_flagged = not all(s.flagged for s in targets)  # any unstarred -> star all
@@ -1340,8 +1370,9 @@ class MainScreen(Screen):
         self._io(mv, reload=True)
         unread_gone = 0
         for s, _ in plan:
-            if s in self.all_msgs:
-                self.all_msgs.remove(s)
+            live = self._live(s)
+            if live is not None:
+                self.all_msgs.remove(live)
             self._cache.pop((s.account, folder, s.uid), None)
             unread_gone += s.unread
         if unread_gone:
@@ -1349,13 +1380,15 @@ class MainScreen(Screen):
         self.selected.clear()
         self.apply_filter(keep_cursor=True)
         what = 'Archived' if archive else f'Moved to {be.decode_folder(plan[0][1])}'
-        self.app.notify(f'{what}: {len(plan)}'
-                        + (f' · {skipped} skipped (no such folder)' if skipped else ''))
+        self.app.notify(escape(f'{what}: {len(plan)}'
+                               + (f' · {skipped} skipped (no such folder)' if skipped else '')))
 
     # -- load older --
     def action_load_older(self):
         mins = {}
-        for s in self.all_msgs:
+        # a message inside its undo window is still on the server: count it,
+        # or the next page would hand it straight back
+        for s in self.all_msgs + [p[0] for p in self._pending]:
             if s.uid.isdigit():
                 mins[s.account] = min(mins.get(s.account, int(s.uid)), int(s.uid))
         if not mins:
@@ -1378,7 +1411,8 @@ class MainScreen(Screen):
     def _older_loaded(self, folder, scope, msgs):
         if folder != self.folder or scope != self.scope:
             return
-        have = {(s.account, s.uid) for s in self.all_msgs}
+        have = ({(s.account, s.uid) for s in self.all_msgs}
+                | {(s.account, s.uid) for s, _, _, _ in self._pending} | set(self._inflight))
         new = [m for m in msgs if (m.account, m.uid) not in have]
         if not new:
             self.app.notify('No older messages')
@@ -1404,8 +1438,9 @@ class MainScreen(Screen):
         self._io(rm, reload=True)
         unread_gone = 0
         for s in targets:
-            if s in self.all_msgs:
-                self.all_msgs.remove(s)
+            live = self._live(s)
+            if live is not None:
+                self.all_msgs.remove(live)
             self._cache.pop((s.account, folder, s.uid), None)
             unread_gone += s.unread
         if unread_gone:
@@ -1417,10 +1452,15 @@ class MainScreen(Screen):
     def do_delete(self, s):
         """Optimistic single delete with a 5 s undo window; the server call runs
         when the window closes (or the view changes)."""
+        key = (s.account, s.uid)
+        if any((p.account, p.uid) == key for p, _, _, _ in self._pending) or key in self._inflight:
+            return  # already on its way
         folder = self.folder
-        index = self.all_msgs.index(s) if s in self.all_msgs else 0
-        if s in self.all_msgs:
-            self.all_msgs.remove(s)
+        live = self._live(s)
+        s = live or s
+        index = self.all_msgs.index(live) if live is not None else 0
+        if live is not None:
+            self.all_msgs.remove(live)
         self._cache.pop((s.account, folder, s.uid), None)
         if s.unread:
             self._adjust_unread(folder, -1)
@@ -1430,18 +1470,41 @@ class MainScreen(Screen):
         self.apply_filter(keep_cursor=True)
         self.app.notify('Deleted — z undoes within 5 s', timeout=5)
 
+    def _server_delete(self, s, folder):
+        """Hand a delete to the server; the key stays hidden from reloads until
+        the command has actually completed."""
+        key = (s.account, s.uid)
+        self._inflight.add(key)
+        self._seq += 1
+        session = self.app.session
+
+        def go():
+            try:
+                session.delete(s.account, folder, s.uid)
+            finally:
+                self._inflight.discard(key)
+        self._io(go)
+
     def _commit_delete(self, s):
         for item in list(self._pending):
             if item[0] is s:
                 self._pending.remove(item)
-                self._io(partial(self.app.session.delete, s.account, item[2], s.uid))
+                self._server_delete(s, item[2])
                 return
 
-    def _flush_pending(self):
-        for s, _, folder, timer in self._pending:
+    def _flush_pending(self, sync=False):
+        """Commit every pending delete now. sync=True runs the server calls
+        inline — used before logout/quit, when workers would be torn down."""
+        items, self._pending = self._pending, []
+        for s, _, folder, timer in items:
             timer.stop()
-            self._io(partial(self.app.session.delete, s.account, folder, s.uid))
-        self._pending.clear()
+            if sync:
+                try:
+                    self.app.session.delete(s.account, folder, s.uid)
+                except Exception:
+                    pass
+            else:
+                self._server_delete(s, folder)
 
     def action_undo_delete(self):
         if not self._pending:
@@ -1449,7 +1512,8 @@ class MainScreen(Screen):
             return
         s, index, folder, timer = self._pending.pop()
         timer.stop()
-        self.all_msgs.insert(min(index, len(self.all_msgs)), s)
+        if self._live(s) is None:  # never insert a duplicate key
+            self.all_msgs.insert(min(index, len(self.all_msgs)), s)
         if s.unread:
             self._adjust_unread(folder, 1)
         self._seq += 1
@@ -1457,7 +1521,7 @@ class MainScreen(Screen):
         row = next((i for i, m in enumerate(self.view) if m is s), None)
         if row is not None:
             self.query_one('#msgtable', DataTable).move_cursor(row=row)  # cursor on the restored mail
-        self.app.notify(f'Restored "{s.subject[:40]}"')
+        self.app.notify(escape(f'Restored "{s.subject[:40]}"'))
 
     def action_refresh(self):
         self.query_one('#msgtable', DataTable).loading = True
@@ -1471,8 +1535,12 @@ class MainScreen(Screen):
         if self.selected or self.filter_uids is not None:
             self.action_cancel_mode()
             return
+        def quit_now(ok):
+            if ok:
+                self._flush_pending(sync=True)  # a delete inside its undo window still happens
+                self.app.exit()
         self.app.push_screen(ConfirmScreen('Quit tuimail? (Ctrl+Q quits without asking)'),
-                             lambda ok: self.app.exit() if ok else None)
+                             quit_now)
 
     # -- search --
     def action_search(self):
@@ -1644,10 +1712,10 @@ class ReaderScreen(Screen):
         self.app.push_screen(FolderPickScreen(names), done)
 
     def action_toggle_read(self):
-        self.main.action_toggle_read(force=True)
+        self.main.action_toggle_read(force=True, target=self.summary)
 
     def action_toggle_flag(self):
-        self.main.action_toggle_flag(force=True)
+        self.main.action_toggle_flag(force=True, target=self.summary)
 
     def _step(self, delta):
         main = self.main
@@ -1719,7 +1787,7 @@ class ComposeScreen(Screen[bool]):
         title = (f'✉  Reply to {self.seed["reply_to"]}' if self.seed.get('reply_to')
                  else '✉  New message')
         with Vertical():
-            yield Label(title, classes='card-title')
+            yield Label(Text(title), classes='card-title')  # sender names are not markup
             with Horizontal(id='from-row'):
                 yield Label('From')
                 yield Select(options, value=self._initial_from, allow_blank=False, id='from')
@@ -1832,7 +1900,7 @@ class ComposeScreen(Screen[bool]):
 
     def _sent(self, account, to):
         self._sending = False
-        self.app.notify(f'Sent from {account} to {to}')
+        self.app.notify(escape(f'Sent from {account} to {to}'))
         if self.app.screen is self:
             self.dismiss(True)  # dismiss pops the CURRENT screen — only pop ourselves
 
@@ -1862,7 +1930,7 @@ class MailCommands(Provider):
         if not isinstance(screen, MainScreen):
             return
         for label, fn in self._commands(screen):
-            yield DiscoveryHit(label, fn)
+            yield DiscoveryHit(Text(label), fn)  # folder names like [Gmail]/Trash are not markup
 
     async def search(self, query):
         screen = self.screen  # app.screen is the palette itself while it's open
@@ -2063,9 +2131,21 @@ class TuiMail(App):
             return
         self.call_from_thread(self.notify, 'Installed — run tuimail from any terminal')
 
+    def _main_screen(self):
+        return next((s for s in self.screen_stack if isinstance(s, MainScreen)), None)
+
+    def action_quit(self):  # Ctrl+Q: Textual's default, plus committing pending deletes
+        main = self._main_screen()
+        if main is not None:
+            main._flush_pending(sync=True)
+        self.exit()
+
     def action_logout(self):
         if self.session is None:
             return
+        main = self._main_screen()
+        if main is not None:
+            main._flush_pending(sync=True)  # a delete inside its undo window still happens
         old, self.session = self.session, None
         self.auto_login = False  # signing out must stick for the whole session
         threading.Thread(target=old.close, daemon=True).start()

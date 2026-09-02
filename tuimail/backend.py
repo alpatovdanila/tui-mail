@@ -540,21 +540,31 @@ class ImapBackend:
     def folders(self):
         def go():
             typ, data = self._conn.list()
-            names = []
+            names, special = [], {}
             for line in data or []:
                 if not isinstance(line, bytes) or re.search(rb'(?i)\\Noselect', line):
                     continue
-                m = re.match(rb'\([^)]*\)\s+(?:"[^"]*"|NIL)\s+(.+)$', line)
+                m = re.match(rb'\(([^)]*)\)\s+(?:"[^"]*"|NIL)\s+(.+)$', line)
                 if not m:
                     continue
-                name = m.group(1).strip()
+                attrs = m.group(1).lower()
+                name = m.group(2).strip()
                 if name.startswith(b'"') and name.endswith(b'"'):
                     name = name[1:-1]
                 decoded = name.decode('ascii', 'replace')  # ponytail: modified-UTF7 folder names shown raw
                 if re.search(r'["\r\n]', decoded):
                     continue  # server-controlled name that could break out of our IMAP quoting
+                # RFC 6154 special-use attributes beat name guessing
+                if b'\\trash' in attrs:
+                    special.setdefault('trash', decoded)
+                if b'\\archive' in attrs or b'\\all' in attrs:
+                    special.setdefault('archive', decoded)
                 names.append(decoded)
             names.sort(key=lambda n: (n.upper() != 'INBOX', n.upper()))
+            # the STATUS round-trips below are capped, but special-folder lookups
+            # must see every folder — a hidden Trash must never turn delete into expunge
+            self.all_folder_names = list(names)
+            self.special = special
             out = []
             for name in names[:30]:
                 unseen = 0
@@ -727,7 +737,8 @@ class Session:
                 continue
             per_account[a.name] = dict(account_folders)
             self._folder_names = getattr(self, '_folder_names', {})
-            self._folder_names[a.name] = [n for n, _ in account_folders]
+            self._folder_names[a.name] = list(
+                getattr(a.backend, 'all_folder_names', None) or [n for n, _ in account_folders])
             for name, unread in account_folders:
                 if name not in merged:
                     order.append(name)
@@ -740,9 +751,30 @@ class Session:
     def folders(self, scope=None):
         return self.folders_detailed(scope)[0]
 
+    def _refresh_names(self, account):
+        """Fetch one account's folder list on demand (unknown != absent)."""
+        self._folder_names = getattr(self, '_folder_names', {})
+        try:
+            backend = self.account(account).backend
+            listed = backend.folders()
+            self._folder_names[account] = list(
+                getattr(backend, 'all_folder_names', None) or [n for n, _ in listed])
+        except Exception:
+            self._folder_names.pop(account, None)
+        return self._folder_names.get(account)
+
     def special_folder(self, account, kind):
-        """Name of the account's Trash/Archive folder, or None if it has none."""
-        names = getattr(self, '_folder_names', {}).get(account, [])
+        """Name of the account's Trash/Archive folder, or None if it has none.
+        Raises if the folder list is unavailable — the caller must not guess."""
+        backend = self.account(account).backend
+        declared = getattr(backend, 'special', {}).get(kind)
+        if declared:
+            return declared
+        names = getattr(self, '_folder_names', {}).get(account)
+        if names is None:
+            names = self._refresh_names(account)
+        if names is None:
+            raise RuntimeError(f'{account}: folder list unavailable — refresh (R) first')
         wanted = self.SPECIAL[kind]
         for n in names:
             if n.lower() in wanted or decode_folder(n).lower() in wanted:

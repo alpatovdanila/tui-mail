@@ -306,6 +306,51 @@ def helpers():
         be._smtp_send_once = orig_once
     assert calls == [465, 587], calls
 
+    # special folders: RFC 6154 attributes and the full LIST (not the 30-folder
+    # STATUS cap) decide where deletes go — a hidden Trash must never mean expunge
+    class _FakeConn:
+        def __init__(self):
+            self.log = []
+
+        def list(self):
+            lines = [b'(\\HasNoChildren) "/" "INBOX"']
+            lines += [b'(\\HasNoChildren) "/" "Label%02d"' % i for i in range(40)]
+            lines.append(b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"')
+            return 'OK', lines
+
+        def status(self, name, what):
+            return 'OK', [b'%s (UNSEEN 0)' % name.encode()]
+
+        def select(self, folder):
+            return 'OK', [b'1']
+
+        def uid(self, *args):
+            self.log.append(args)
+            return 'OK', [b'']
+
+        def expunge(self):
+            self.log.append(('expunge',))
+            return 'OK', [b'']
+
+    ib = be.ImapBackend.__new__(be.ImapBackend)
+    ib.address, ib._pw, ib._imap_host, ib._smtp_host = 'a@b.c', '', 'i', 's'
+    ib._conn, ib._selected = _FakeConn(), None
+    import threading as _th
+    ib._lock = _th.Lock()
+    counted = ib.folders()
+    assert len(counted) == 30 and '[Gmail]/Trash' in ib.all_folder_names
+    assert ib.special['trash'] == '[Gmail]/Trash'
+    sess = be.Session([be.Account('g', 'red', ib)])
+    sess.folders_detailed()
+    sess.delete('g', 'INBOX', '7')
+    assert ('MOVE', '7', '"[Gmail]/Trash"') in ib._conn.log, ib._conn.log
+    assert ('expunge',) not in ib._conn.log
+    # unknown folder list -> refreshed on demand, never guessed as 'no Trash'
+    sess2 = be.Session([be.Account('g', 'red', ib)])
+    ib._conn.log.clear()
+    sess2.delete('g', 'INBOX', '8')
+    assert ('MOVE', '8', '"[Gmail]/Trash"') in ib._conn.log
+
     # regression: duplicate account names are uniquified (the name routes every op)
     s = be.Session([be.Account('john', 'red', be.DemoBackend('a@x', 'home')),
                     be.Account('john', 'blue', be.DemoBackend('b@x', 'work'))])
@@ -1022,12 +1067,97 @@ async def phase12():
         await pilot.press('L')
         await settle(pilot)
         assert isinstance(app.screen, MainScreen)
+
+        # a page of older mail must not resurrect a pending delete, and undo
+        # after it must not crash the table with a duplicate key
+        t.move_cursor(row=0)
+        await pilot.pause()
+        pending_victim = main.current()
+        await pilot.press('d')
+        await pilot.pause()
+        orig_older = app.session.list_older
+        app.session.list_older = lambda folder, scope, mins: [be.Summary(
+            uid=pending_victim.uid, sender='x', subject='resurrected',
+            account=pending_victim.account)]
+        try:
+            main._older_loaded(main.folder, main.scope, app.session.list_older('', None, {}))
+        finally:
+            app.session.list_older = orig_older
+        assert all(s.uid != pending_victim.uid or s.account != pending_victim.account
+                   for s in main.all_msgs)
+        await pilot.press('z')
+        await pilot.pause()
+        assert isinstance(app.screen, MainScreen) and app.is_running
+        assert sum(1 for s in main.all_msgs
+                   if (s.account, s.uid) == (pending_victim.account, pending_victim.uid)) == 1
+
+        # bracketed sender names and Gmail-style folder names are never markup
+        from tuimail.app import ComposeScreen
+        app.push_screen(ComposeScreen({'reply_to': '[/list] Bob', 'account': 'personal'}))
+        await pilot.pause()
+        assert isinstance(app.screen, ComposeScreen)
+        await pilot.press('escape')
+        await pilot.pause()
+        app.push_screen(FolderPickScreen(['[Gmail]/Trash']))
+        await pilot.pause()
+        opt = app.screen.query_one(OptionList).get_option_at_index(0)
+        assert '[Gmail]/Trash' in str(getattr(opt.prompt, 'plain', opt.prompt))
+        await pilot.press('escape')
+        await pilot.pause()
+
+        # logging out inside the undo window still commits the delete
+        t.focus()
+        await pilot.pause()
+        t.move_cursor(row=0)
+        await pilot.pause()
+        gone = main.current()
+        trash_before = len(personal._data['Trash'])
+        await pilot.press('d')
+        await pilot.pause()
+        await pilot.press('ctrl+l')
+        await settle(pilot)
+        assert len(personal._data['Trash']) == trash_before + (gone.account == 'personal')
     print('phase 12 (P1: move/archive/undo/reader/counts/older): ok')
+
+
+# --- phase 13: review fixes for P0/P1 ------------------------------------------
+async def phase13():
+    from textual.widgets import ListView as _LV
+    # editing an account keeps a customised SMTP host when the provider is inferred
+    cfg = be.load_config()
+    cfg['accounts'][0]['smtp_host'] = 'smtp.gmail.com:587'
+    be.save_config(cfg)
+    app = TuiMail()
+    async with app.run_test(size=(120, 40)) as pilot:
+        from tuimail.app import AccountFormScreen
+        app.switch_screen(AccountFormScreen(0))
+        await pilot.pause()
+        await pilot.pause()
+        assert app.screen.query_one('#smtp', Input).value == 'smtp.gmail.com:587'
+        assert app.screen.query_one('#provider', Select).value == 'Gmail'
+    cfg = be.load_config()
+    cfg['accounts'][0]['smtp_host'] = 'smtp.gmail.com:465'
+    be.save_config(cfg)
+
+    # shrinking below 90 columns never strands focus on the hidden sidebar
+    app = TuiMail()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await demo_login(pilot)
+        main = app.screen
+        main.query_one('#folders', _LV).focus()
+        await pilot.pause()
+        await pilot.resize_terminal(80, 24)
+        await pilot.pause()
+        assert app.focused is table(app), app.focused
+    print('phase 13 (review fixes: account edit, layout focus): ok')
+
+
+PHASES_EXTRA = {'13': phase13}
 
 
 PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5,
           '6': phase6, '7': phase7, '8': phase8, '9': phase9, '10': phase10,
-          '11': phase11, '12': phase12}
+          '11': phase11, '12': phase12, **PHASES_EXTRA}
 
 
 async def main():

@@ -4,6 +4,31 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.12.1 — 2026-09-02
+
+An adversarial review of the 1.10/1.11 work; twelve confirmed findings, all fixed.
+
+### Fixed
+- **Delete could expunge when Trash existed but was not visible**: the
+  special-folder lookup now uses the full IMAP `LIST` (not the 30-folder
+  unread-count cap, which hid Gmail's `[Gmail]/Trash` behind 23+ labels) and
+  honours RFC 6154 `\Trash` / `\Archive` attributes; an unknown folder list
+  is fetched on demand rather than treated as "no Trash".
+- A delete inside its 5 s undo window is committed on logout, `q` and
+  `Ctrl+Q` instead of being silently dropped.
+- A committed delete can no longer be resurrected by a poll that overlaps
+  the server call; "load older" no longer hands a pending delete back, and
+  undo after it no longer crashes the list with a duplicate key.
+- Reader `d`, `u`, `s` and `m` act on the right message even when the list
+  was refreshed underneath the reader.
+- Reply title, folder picker, attachment list, palette entries and toasts no
+  longer parse names such as `[Gmail]/Trash` or `[list] Bob` as markup
+  (which crashed the compose screen).
+- Editing an account no longer resets a customised SMTP/IMAP host (for
+  example `smtp.gmail.com:587`) when the provider is inferred.
+- Shrinking the terminal below 90 columns while the sidebar has focus no
+  longer leaves the keyboard focus on a hidden widget.
+
 ## 1.12.0 — 2026-09-02
 
 ### Added
