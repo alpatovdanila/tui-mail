@@ -4,6 +4,19 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.5.1 — 2026-09-02
+
+### Fixed
+- **macOS .app installs now keep settings in `~/.tuimail.json`** instead of
+  inside the app bundle (where updates wiped them and portable mode refused
+  to save passwords, silently breaking auto sign-in). Existing in-bundle
+  configs migrate automatically on first run.
+- Signing out now sticks across the Manage accounts round-trip too.
+- Decoded folder names are sanitized — a hostile server can't smuggle
+  terminal escapes through modified-UTF7 labels.
+- Inline HTML tags no longer split words ("Casa blanca") or detach
+  punctuation in text-mode rendering.
+
 ## 1.5.0 — 2026-09-02
 
 ### Added

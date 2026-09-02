@@ -170,6 +170,30 @@ def helpers():
     assert be.decode_folder('&BB8EQAQ4BDIENQRC-') == 'Привет'
     assert be.decode_folder('INBOX') == 'INBOX'
     assert be.decode_folder('&-x') == '&x'
+    # ...but mUTF-7 can synthesize ESC/newlines from printable wire names
+    assert '\x1b' not in be.decode_folder('&ABs-[31mEVIL&ABs-[0m')
+    assert '\n' not in be.decode_folder('A&AAo-B')
+
+    # inline tags must not split words or detach punctuation
+    inline = email.message_from_bytes(
+        b'Content-Type: text/html\r\n\r\n<p>Casa<i>blanca</i> on <b>main</b>.</p>',
+        policy=email.policy.default)
+    out = be.body_of(inline)
+    assert 'Casablanca' in out and 'main.' in out, repr(out)
+
+    # a macOS .app install is NOT portable mode: config lives in $HOME
+    import sys as _sysx
+    saved_envx = os.environ.pop('TUIMAIL_CONFIG')
+    orig_exex = _sysx.executable
+    _sysx.frozen = True
+    _sysx.executable = '/Applications/tuimail.app/Contents/MacOS/tuimail-bin'
+    try:
+        assert be.config_path() == Path.home() / '.tuimail.json'
+        assert not be.portable_mode()
+    finally:
+        del _sysx.frozen
+        _sysx.executable = orig_exex
+        os.environ['TUIMAIL_CONFIG'] = saved_envx
 
     # layout-table HTML must not render as runs of blank lines
     layout = ('<table>' + '<tr><td>&nbsp;</td></tr>' * 10
@@ -571,6 +595,13 @@ async def phase7():
             assert isinstance(app.screen, LoginScreen)
             await pilot.pause(0.3)  # logging out must stick — no auto re-login loop
             assert isinstance(app.screen, LoginScreen)
+            # ...including across the Manage accounts round-trip
+            await pilot.click('#manage')
+            await pilot.pause()
+            await pilot.click('#done')
+            await settle(pilot)
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, LoginScreen), app.screen
     finally:
         be.ImapBackend = orig
         cfg = be.load_config()

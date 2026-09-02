@@ -329,13 +329,12 @@ class AccountsScreen(Screen):
 
 
 class LoginScreen(Screen):
-    def __init__(self, auto=True):
-        super().__init__()
-        self._auto = auto
-
     def on_mount(self):
-        # every password saved -> no reason to make the user press Sign in
-        if self._auto and self._accounts and all(a.get('password') for a in self._accounts):
+        # every password saved -> no reason to make the user press Sign in;
+        # the app-level latch keeps an explicit logout sticky across every
+        # path back here (Manage accounts, account edits, ...)
+        if (getattr(self.app, 'auto_login', True) and self._accounts
+                and all(a.get('password') for a in self._accounts)):
             self._start_signin()
 
     def compose(self):
@@ -1136,6 +1135,7 @@ class TuiMail(App):
     BINDINGS = [Binding('ctrl+l', 'logout', 'Logout', show=False, priority=True)]
 
     session = None
+    auto_login = True
 
     def on_mount(self):
         try:
@@ -1149,9 +1149,10 @@ class TuiMail(App):
         if self.session is None:
             return
         old, self.session = self.session, None
+        self.auto_login = False  # signing out must stick for the whole session
         threading.Thread(target=old.close, daemon=True).start()
         self.sub_title = ''
         while len(self.screen_stack) > 1:
             self.pop_screen()
-        self.push_screen(LoginScreen(auto=False))  # signing out must stick
+        self.push_screen(LoginScreen())
         self.notify('Signed out')

@@ -57,11 +57,15 @@ PROVIDERS = {
 def config_path() -> Path:
     if p := os.environ.get('TUIMAIL_CONFIG'):
         return Path(p)
-    if getattr(sys, 'frozen', False):  # portable binary: settings travel next to it
-        here = Path(sys.executable).parent / 'tuimail.json'
-        # installed to a non-writable dir (e.g. /usr/local/bin) -> fall through to home
-        if here.exists() or os.access(here.parent, os.W_OK):
-            return here
+    if getattr(sys, 'frozen', False):
+        exe_dir = Path(sys.executable).parent
+        # a macOS .app install is not portable media: its Contents/MacOS dir is
+        # user-writable, but settings belong in $HOME (and survive app updates)
+        if '.app/Contents/' not in exe_dir.as_posix():
+            here = exe_dir / 'tuimail.json'  # portable binary: settings travel next to it
+            # non-writable dir (e.g. /usr/local/bin) -> fall through to home
+            if here.exists() or os.access(exe_dir, os.W_OK):
+                return here
     return Path.home() / '.tuimail.json'
 
 
@@ -75,8 +79,19 @@ def next_color(cfg) -> str:
 
 
 def load_config() -> dict:
+    p = config_path()
+    if not p.exists() and getattr(sys, 'frozen', False):
+        # pre-1.5.1 mac builds kept the config inside the .app bundle — migrate
+        legacy = Path(sys.executable).parent / 'tuimail.json'
+        if legacy != p and legacy.exists():
+            try:
+                p.write_bytes(legacy.read_bytes())
+                if os.name == 'posix':
+                    p.chmod(0o600)
+            except OSError:
+                pass
     try:
-        cfg = json.loads(config_path().read_text('utf-8'))
+        cfg = json.loads(p.read_text('utf-8'))
         if not isinstance(cfg, dict):
             return {}
     except (OSError, ValueError):
@@ -207,7 +222,9 @@ def decode_folder(name: str) -> str:
             return base64.b64decode(chunk.replace(',', '/') + pad).decode('utf-16-be')
         except Exception:
             return m.group(0)
-    return re.sub(r'&([A-Za-z0-9+,]*)-', _dec, name)
+    # mUTF-7 is printable ASCII on the wire but can synthesize ESC/CR/LF —
+    # it bypasses the raw-name filters, so sanitize the decoded result
+    return sanitize(re.sub(r'&([A-Za-z0-9+,]*)-', _dec, name), keep_newlines=False)
 
 
 def nice_from(raw) -> str:
@@ -231,7 +248,11 @@ def body_of(msg) -> str:
         text = re.sub(r'(?i)<br\s*/?>|</p>|</div>|</tr>|</li>|</h[1-6]>|</table>|</blockquote>',
                       '\n', text)
         import html as _html
-        text = _html.unescape(re.sub(r'<[^>]+>', ' ', text))  # ponytail: naive HTML strip; html.parser if it matters
+        # block-ish tags separate content with a space; inline tags (b/i/a/span)
+        # vanish so words spanning them don't split ('Casa<i>blanca</i>')
+        text = re.sub(r'(?i)</?(?:td|th|p|div|table|tr|ul|ol|li|h[1-6]|blockquote)\b[^>]*>',
+                      ' ', text)
+        text = _html.unescape(re.sub(r'<[^>]+>', '', text))  # ponytail: naive HTML strip; html.parser if it matters
         text = re.sub(r'[ \t\xa0]+', ' ', text)
         # layout-table HTML leaves runs of whitespace-only lines; strip each
         # line so the blank-line collapse below actually collapses them
