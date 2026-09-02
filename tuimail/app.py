@@ -40,6 +40,7 @@ HELP_ROWS = [
     ('Mailbox', ''),
     ('● / ○', 'unread / read — the circle color is the account'),
     ('j / k / ↑ ↓', 'move through messages'),
+    ('Space', 'select messages — d/u/s act on all, Esc cancels'),
     ('g / G', 'first / last message'),
     ('Enter', 'open message'),
     ('Tab', 'cycle panes (accounts · folders · list)'),
@@ -460,8 +461,9 @@ class MainScreen(Screen):
         Binding('d', 'delete', 'Delete'),
         Binding('u', 'toggle_read', 'Read/unread', show=False),
         Binding('s', 'toggle_flag', 'Star', show=False),
+        Binding('space', 'toggle_select', 'Select', show=False),
         Binding('slash', 'search', 'Search', key_display='/'),
-        Binding('escape', 'clear_search', 'Clear search', show=False),
+        Binding('escape', 'cancel_mode', 'Cancel', show=False),
         Binding('R', 'refresh', 'Refresh'),
         Binding('question_mark', 'help', 'Help', key_display='?'),
         Binding('q', 'quit_app', 'Quit'),
@@ -481,6 +483,7 @@ class MainScreen(Screen):
                 yield DataTable(id='msgtable')
                 with VerticalScroll(id='preview-scroll'):
                     yield Static(id='preview')
+        yield Static(id='selbar')
         yield Footer()
 
     def on_mount(self):
@@ -488,6 +491,7 @@ class MainScreen(Screen):
         self.folder = 'INBOX'
         self.all_msgs, self.view = [], []
         self.filter_uids = None  # set of (account, uid)
+        self.selected = set()  # selection mode: set of (account, uid)
         self.folder_counts = []
         self._cache = {}
         self._pv_timer = None
@@ -608,10 +612,16 @@ class MainScreen(Screen):
     def apply_filter(self, keep_cursor=False):
         self.view = [s for s in self.all_msgs
                      if self.filter_uids is None or (s.account, s.uid) in self.filter_uids]
+        # selection only ever covers visible rows — a hidden selected message
+        # must not be silently acted on
+        self.selected &= {(s.account, s.uid) for s in self.view}
+        self.update_selection_ui()
         self.rebuild_table(keep_cursor)
         if not self.view:
             self._set_preview(Text('Nothing here — the folder is empty or no matches.',
                                    style='dim'))
+
+    SEL_BG = ' on #2d3f76'
 
     def rebuild_table(self, keep_cursor=False):
         table = self.query_one('#msgtable', DataTable)
@@ -619,21 +629,59 @@ class MainScreen(Screen):
         table.clear()
         session = self.app.session
         for s in self.view:
-            style = 'bold' if s.unread else ''
+            sel = (s.account, s.uid) in self.selected
+            bg = self.SEL_BG if sel else ''
+            style = ('bold' if s.unread else '') + bg
             # one circle, colored by account: filled = unread, hollow = read
             icons = Text.assemble(
-                ('●' if s.unread else '○', session.color(s.account)),
-                ('★' if s.flagged else ' ', 'yellow'),
+                ('●' if s.unread else '○', session.color(s.account) + bg),
+                ('★' if s.flagged else ' ', 'yellow' + bg),
             )
             table.add_row(
                 icons,
                 Text(s.sender[:26], style=style),
                 Text(s.subject[:80], style=style),
-                Text(nice_date(s.date), style='dim'),
+                Text(nice_date(s.date), style='dim' + bg),
                 key=f'{s.account}/{s.uid}',
             )
         if self.view:
             table.move_cursor(row=max(0, min(cur, len(self.view) - 1)))
+
+    # -- selection mode --
+    def _selected_msgs(self):
+        return [s for s in self.view if (s.account, s.uid) in self.selected]
+
+    def update_selection_ui(self):
+        n = len(self.selected)
+        bar = self.query_one('#selbar', Static)
+        footer = self.query_one(Footer)
+        if n:
+            bar.update(Text.assemble(
+                (f' {n} selected ', 'bold'),
+                ('  Space toggle · ', ''),
+                (f'd delete ({n})', 'bold'),
+                (' · u mark read/unread · s star · Esc cancel', ''),
+            ))
+        bar.display = bool(n)
+        footer.display = not n
+
+    def action_toggle_select(self):
+        s = self.current()
+        if not s:
+            return
+        key = (s.account, s.uid)
+        self.selected.symmetric_difference_update({key})
+        self.update_selection_ui()
+        self.rebuild_table(keep_cursor=True)
+        self.action_move(1)  # advance like a file manager
+
+    def action_cancel_mode(self):
+        if self.selected:
+            self.selected.clear()
+            self.update_selection_ui()
+            self.rebuild_table(keep_cursor=True)
+            return
+        self.action_clear_search()
 
     @ui_callback
     def _set_preview(self, content):
@@ -715,6 +763,9 @@ class MainScreen(Screen):
 
     # -- open / reply --
     def on_data_table_row_selected(self, event):
+        if self.selected:  # selection mode: Enter/click toggles, never opens
+            self.action_toggle_select()
+            return
         s = self.current()
         if s:
             self._open(s, self.folder)
@@ -758,6 +809,9 @@ class MainScreen(Screen):
         self.apply_filter(keep_cursor=True)
 
     def action_reply(self):
+        if self.selected:
+            self.app.notify('Replying needs a single message — Esc to leave selection')
+            return
         s = self.current()
         if s:
             self._reply(s, self.folder)
@@ -802,32 +856,85 @@ class MainScreen(Screen):
         self.app.push_screen(ComposeScreen({'account': self.scope}))
 
     def action_toggle_read(self):
-        s = self.current()
-        if not s:
+        targets = self._selected_msgs() or ([self.current()] if self.current() else [])
+        if not targets:
             return
-        s.unread = not s.unread
+        make_unread = not any(s.unread for s in targets)  # any unread -> read all
+        session, folder = self.app.session, self.folder
+        changed = [s for s in targets if s.unread != make_unread]
+        if not changed:
+            return
         self._seq += 1
-        self._io(partial(self.app.session.mark, s.account, self.folder, s.uid,
-                         read=not s.unread))
-        self._adjust_unread(self.folder, 1 if s.unread else -1)
+        for s in changed:
+            s.unread = make_unread
+        ops = [(s.account, s.uid) for s in changed]
+
+        def store():
+            for account, uid in ops:
+                session.mark(account, folder, uid, read=not make_unread)
+        self._io(store)
+        self._adjust_unread(folder, len(changed) if make_unread else -len(changed))
         self.rebuild_table(keep_cursor=True)
 
     def action_toggle_flag(self):
-        s = self.current()
-        if not s:
+        targets = self._selected_msgs() or ([self.current()] if self.current() else [])
+        if not targets:
             return
-        s.flagged = not s.flagged
+        make_flagged = not all(s.flagged for s in targets)  # any unstarred -> star all
+        session, folder = self.app.session, self.folder
+        changed = [s for s in targets if s.flagged != make_flagged]
+        if not changed:
+            return
         self._seq += 1
-        self._io(partial(self.app.session.flag, s.account, self.folder, s.uid,
-                         flagged=s.flagged))
+        for s in changed:
+            s.flagged = make_flagged
+        ops = [(s.account, s.uid) for s in changed]
+
+        def store():
+            for account, uid in ops:
+                session.flag(account, folder, uid, flagged=make_flagged)
+        self._io(store)
         self.rebuild_table(keep_cursor=True)
 
     def action_delete(self):
+        targets = self._selected_msgs()
+        if targets:
+            self.app.push_screen(
+                ConfirmScreen(f'Delete {len(targets)} selected message(s)?'),
+                lambda ok: self.do_delete_many(targets) if ok else None)
+            return
         s = self.current()
         if not s:
             return
         self.app.push_screen(ConfirmScreen(f'Delete "{s.subject[:48]}"?'),
                              lambda ok: self.do_delete(s) if ok else None)
+
+    def do_delete_many(self, targets):
+        self._seq += 1
+        session, folder = self.app.session, self.folder
+        ops = [(s.account, s.uid) for s in targets]
+
+        def rm():
+            failed = 0
+            for account, uid in ops:
+                try:
+                    session.delete(account, folder, uid)
+                except Exception:
+                    failed += 1
+            if failed:
+                raise RuntimeError(f'{failed} of {len(ops)} deletions failed — refresh (R)')
+        self._io(rm)
+        unread_gone = 0
+        for s in targets:
+            if s in self.all_msgs:
+                self.all_msgs.remove(s)
+            self._cache.pop((s.account, folder, s.uid), None)
+            unread_gone += s.unread
+        if unread_gone:
+            self._adjust_unread(folder, -unread_gone)
+        self.selected.clear()
+        self.apply_filter(keep_cursor=True)
+        self.app.notify(f'Deleted {len(targets)}')
 
     def do_delete(self, s):
         self._seq += 1

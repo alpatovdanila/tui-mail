@@ -661,8 +661,54 @@ async def phase8():
     print('phase 8 (update check): ok')
 
 
+# --- phase 9: selection mode -----------------------------------------------------
+async def phase9():
+    app = TuiMail()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await demo_login(pilot)
+        main = app.screen
+        t = table(app)
+        n = t.row_count
+
+        # space selects and advances; the selection bar replaces the footer
+        await pilot.press('space', 'space')
+        assert len(main.selected) == 2 and t.cursor_row == 2
+        bar = main.query_one('#selbar')
+        assert bar.display and 'd delete (2)' in main.query_one('#selbar').render().plain
+        from textual.widgets import Footer
+        assert not main.query_one(Footer).display
+
+        # enter toggles instead of opening; reply is blocked
+        await pilot.press('enter')
+        await settle(pilot)
+        assert isinstance(app.screen, MainScreen) and len(main.selected) == 3
+        await pilot.press('r')
+        await settle(pilot)
+        assert isinstance(app.screen, MainScreen)
+
+        # bulk star: any unstarred -> all three starred
+        await pilot.press('s')
+        await settle(pilot)
+        assert all(s.flagged for s in main.view[:3])
+
+        # escape leaves selection mode and restores the footer
+        await pilot.press('escape')
+        assert not main.selected and main.query_one(Footer).display
+        assert not main.query_one('#selbar').display
+
+        # bulk delete with count in the confirm
+        await pilot.press('space', 'space')
+        await pilot.press('d')
+        await pilot.pause()
+        await pilot.press('y')
+        await settle(pilot)
+        assert table(app).row_count == n - 2
+        assert not main.selected
+    print('phase 9 (selection mode): ok')
+
+
 PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5,
-          '6': phase6, '7': phase7, '8': phase8}
+          '6': phase6, '7': phase7, '8': phase8, '9': phase9}
 
 
 async def main():

@@ -4,6 +4,16 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.8.0 — 2026-09-02
+
+### Added
+- **Selection mode**: Space selects the message under the cursor (and
+  advances); selected rows highlight. While anything is selected, the footer
+  becomes a selection bar with live counts — "d delete (3)", bulk
+  read/unread (u) and star (s) — Enter toggles instead of opening, reply is
+  blocked, and Esc clears the selection. Search filters prune the selection
+  so hidden messages are never acted on.
+
 ## 1.7.2 — 2026-09-02
 
 ### Fixed
