@@ -273,11 +273,24 @@ def body_markdown(msg) -> str | None:
         src = (part.get_payload(decode=True) or b'').decode('utf-8', 'replace')
     src = re.sub(r'(?is)<(script|style)\b.*?(?:</\1\s*>|\Z)', '', src[:2_000_000])
     try:
+        from bs4 import BeautifulSoup
         from markdownify import markdownify
-        md = markdownify(src, heading_style='ATX', strip=['script', 'style'])
+        soup = BeautifulSoup(src, 'html.parser')
+        # email HTML is mostly LAYOUT tables (no <th>); as markdown tables they
+        # render as empty grids — flatten them to plain blocks, keep data tables
+        for t in soup.find_all('table'):
+            if t.find('th') is None:
+                own = [c for c in t.find_all(['thead', 'tbody', 'tfoot', 'tr', 'td'])
+                       if c.find_parent('table') is t]
+                for tag in own + [t]:
+                    tag.name = 'div'
+        md = markdownify(str(soup), heading_style='ATX',
+                         strip=['script', 'style', 'img'])
     except Exception:
         return None
     md = re.sub(r'\n{3,}', '\n\n', md).strip()
+    if not re.sub(r'[\s|\-:*_>#!\[\]()`.+]', '', md):
+        return None  # only borders/punctuation survived — use the text path
     return sanitize(md)
 
 

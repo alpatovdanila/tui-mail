@@ -156,6 +156,28 @@ def helpers():
     ctx = captured['ctx']
     assert ctx is not None and ctx.verify_mode == _ssl.CERT_REQUIRED and ctx.check_hostname
 
+    # marketing layout tables (no <th>) flatten instead of empty markdown grids
+    layout_html = ('<table><tr><td><h2>Hello</h2></td><td>'
+                   '<table><tr><td>inner text</td></tr></table></td></tr></table>')
+    m3 = email.message_from_bytes(
+        ('Content-Type: text/html\r\n\r\n' + layout_html).encode(),
+        policy=email.policy.default)
+    md3 = be.body_markdown(m3)
+    assert md3 and 'Hello' in md3 and 'inner text' in md3, repr(md3)
+    assert '|' not in md3  # no grid borders for layout tables
+    # real data tables (with <th>) keep their grid
+    m4 = email.message_from_bytes(
+        b'Content-Type: text/html\r\n\r\n'
+        b'<table><tr><th>H</th></tr><tr><td>v</td></tr></table>',
+        policy=email.policy.default)
+    md4 = be.body_markdown(m4)
+    assert md4 and '|' in md4 and 'v' in md4, repr(md4)
+    # a junk-only conversion falls back to the plain-text path
+    m5 = email.message_from_bytes(
+        b'Content-Type: text/html\r\n\r\n<table><tr><td></td><td></td></tr></table>',
+        policy=email.policy.default)
+    assert be.body_markdown(m5) is None
+
     # updater basics: version compare and platform asset selection
     assert up.parse_version('v1.2.3') == (1, 2, 3)
     assert up.is_newer('v99.0.0') and not up.is_newer('v0.0.1') and not up.is_newer('')

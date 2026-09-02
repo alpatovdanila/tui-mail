@@ -38,6 +38,7 @@ WELCOME = (
 
 HELP_ROWS = [
     ('Mailbox', ''),
+    ('● / ○', 'unread / read — the circle color is the account'),
     ('j / k / ↑ ↓', 'move through messages'),
     ('g / G', 'first / last message'),
     ('Enter', 'open message'),
@@ -493,7 +494,7 @@ class MainScreen(Screen):
         self._seq = 0  # bumped on every optimistic local change; stale loads are dropped
         table = self.query_one('#msgtable', DataTable)
         table.cursor_type = 'row'
-        table.add_column(' ', width=3)
+        table.add_column(' ', width=2)
         table.add_column('From', width=26)
         table.add_column('Subject')
         table.add_column('When', width=10)
@@ -619,9 +620,9 @@ class MainScreen(Screen):
         session = self.app.session
         for s in self.view:
             style = 'bold' if s.unread else ''
+            # one circle, colored by account: filled = unread, hollow = read
             icons = Text.assemble(
-                ('●', session.color(s.account)),
-                ('●' if s.unread else ' ', 'cyan'),
+                ('●' if s.unread else '○', session.color(s.account)),
                 ('★' if s.flagged else ' ', 'yellow'),
             )
             table.add_row(

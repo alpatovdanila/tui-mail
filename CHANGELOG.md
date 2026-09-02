@@ -4,6 +4,17 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.7.2 — 2026-09-02
+
+### Fixed
+- Marketing HTML (nested layout tables) no longer renders as empty grids in
+  the reader: header-less tables flatten into plain blocks, image tags are
+  dropped, and a conversion that still comes out as junk falls back to the
+  plain-text renderer.
+- The message list shows **one** circle per message, colored by account:
+  filled = unread, hollow = read; ★ only when starred. (Previously unread
+  mail grew a second dot.)
+
 ## 1.7.1 — 2026-09-02
 
 ### Fixed
