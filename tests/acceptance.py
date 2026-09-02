@@ -154,6 +154,37 @@ def helpers():
     ctx = captured['ctx']
     assert ctx is not None and ctx.verify_mode == _ssl.CERT_REQUIRED and ctx.check_hostname
 
+    # gmail labels in non-Latin scripts (IMAP modified UTF-7) decode for display
+    assert be.decode_folder('&BB8EQAQ4BDIENQRC-') == 'Привет'
+    assert be.decode_folder('INBOX') == 'INBOX'
+    assert be.decode_folder('&-x') == '&x'
+
+    # layout-table HTML must not render as runs of blank lines
+    layout = ('<table>' + '<tr><td>&nbsp;</td></tr>' * 10
+              + '<tr><td>hello</td></tr>' + '<tr><td>&nbsp;</td></tr>' * 10
+              + '<tr><td>world</td></tr></table>')
+    m2 = email.message_from_bytes(
+        ('Content-Type: text/html\r\n\r\n' + layout).encode(),
+        policy=email.policy.default)
+    out = be.body_of(m2)
+    assert 'hello' in out and 'world' in out and '\n\n\n' not in out, repr(out)
+
+    # a network that resets :465 mid-handshake gets an automatic 587 retry
+    import ssl as _ssl465
+    calls = []
+    orig_once = be._smtp_send_once
+
+    def fake_once(host, port, address, password, msg):
+        calls.append(port)
+        if port == 465:
+            raise _ssl465.SSLEOFError('EOF occurred in violation of protocol')
+    be._smtp_send_once = fake_once
+    try:
+        be.smtp_send('smtp.x.y:465', 'a@x.y', 'pw', None)
+    finally:
+        be._smtp_send_once = orig_once
+    assert calls == [465, 587], calls
+
     # regression: duplicate account names are uniquified (the name routes every op)
     s = be.Session([be.Account('john', 'red', be.DemoBackend('a@x', 'home')),
                     be.Account('john', 'blue', be.DemoBackend('b@x', 'work'))])
@@ -507,7 +538,34 @@ async def phase6():
     print('phase 6 (account management): ok')
 
 
-PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5, '6': phase6}
+# --- phase 7: auto sign-in -------------------------------------------------------
+async def phase7():
+    cfg = be.load_config()
+    cfg['accounts'][0]['password'] = 'pw'
+    be.save_config(cfg)
+    orig = be.ImapBackend
+    be.ImapBackend = lambda addr, pw, ih, sh: be.DemoBackend(addr)
+    try:
+        app = TuiMail()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settle(pilot)
+            await settle(pilot)
+            assert isinstance(app.screen, MainScreen), app.screen  # signed in by itself
+            await pilot.press('ctrl+l')
+            await settle(pilot)
+            assert isinstance(app.screen, LoginScreen)
+            await pilot.pause(0.3)  # logging out must stick — no auto re-login loop
+            assert isinstance(app.screen, LoginScreen)
+    finally:
+        be.ImapBackend = orig
+        cfg = be.load_config()
+        cfg['accounts'][0].pop('password', None)
+        be.save_config(cfg)
+    print('phase 7 (auto sign-in): ok')
+
+
+PHASES = {'1': phase1, '2': phase2, '3': phase3, '4': phase4, '5': phase5,
+          '6': phase6, '7': phase7}
 
 
 async def main():

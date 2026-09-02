@@ -40,7 +40,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: pip install "textual==8.2.8" "pyinstaller==6.22.2"  # pinned: release binaries must not float
+      - run: pip install "textual==8.2.8" "pyinstaller==6.22.2" "certifi==2026.1.4"  # pinned: release binaries must not float
       - run: pyinstaller --onefile --console --name tuimail --collect-all textual --add-data "tuimail/app.tcss${{ matrix.sep }}tuimail" ${{ matrix.arch }} run.py
       - name: smoke test (posix)
         if: runner.os != 'Windows'
@@ -73,8 +73,26 @@ jobs:
           # once the user has approved the app, clear quarantine so the inner
           # binary doesn't trigger a second Gatekeeper prompt in Terminal
           xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
-          open -a Terminal "$APP_DIR/Contents/MacOS/tuimail-bin"
+          TERM_APP="Terminal"
+          [ -d "/Applications/iTerm.app" ] && TERM_APP="iTerm"
+          open -a "$TERM_APP" "$APP_DIR/Contents/MacOS/tuimail-bin"
           EOF
+          cat > "dmgroot/Install command line tool.command" <<'EOF'
+          #!/bin/bash
+          set -e
+          BIN="/Applications/tuimail.app/Contents/MacOS/tuimail-bin"
+          if [ ! -x "$BIN" ]; then
+            echo "Drag tuimail.app into Applications first, then run this again."
+            read -r -p "Press Enter to close."
+            exit 1
+          fi
+          echo "Linking tuimail into /usr/local/bin (your password may be asked)…"
+          sudo mkdir -p /usr/local/bin
+          sudo ln -sf "$BIN" /usr/local/bin/tuimail
+          sudo xattr -dr com.apple.quarantine /Applications/tuimail.app 2>/dev/null || true
+          echo "Done. Open a new terminal and run: tuimail"
+          EOF
+          chmod +x "dmgroot/Install command line tool.command"
           chmod +x "$APP/Contents/MacOS/launcher" "$APP/Contents/MacOS/tuimail-bin"
           cat > "$APP/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>

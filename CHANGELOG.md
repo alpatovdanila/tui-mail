@@ -4,6 +4,27 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.4.0 — 2026-09-02
+
+From first real-world macOS field testing — thanks for the feedback:
+
+### Added
+- **Auto sign-in**: when every account has a saved password, the app connects
+  on launch instead of asking you to press Sign in. Logging out sticks.
+- Gmail labels (and any folder) in non-Latin scripts now display correctly
+  (IMAP modified-UTF7 decoding).
+- The dmg regained **Install command line tool.command** — one double-click
+  links `tuimail` into /usr/local/bin for use from your own terminal.
+- The app bundle opens iTerm when installed, falling back to Terminal.
+
+### Fixed
+- Sending on networks that break SMTPS (`[SSL: UNEXPECTED_EOF_WHILE_READING]`
+  on port 465) now automatically retries over 587 STARTTLS.
+- Frozen builds without OS CA paths (typical on macOS) now verify TLS against
+  the bundled certifi store instead of failing every connection.
+- HTML mail no longer renders as one line of text between ten blank ones —
+  layout-table whitespace is collapsed properly.
+
 ## 1.3.0 — 2026-09-02
 
 Security release — a full adversarial audit of the client, every finding

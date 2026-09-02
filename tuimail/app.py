@@ -329,6 +329,15 @@ class AccountsScreen(Screen):
 
 
 class LoginScreen(Screen):
+    def __init__(self, auto=True):
+        super().__init__()
+        self._auto = auto
+
+    def on_mount(self):
+        # every password saved -> no reason to make the user press Sign in
+        if self._auto and self._accounts and all(a.get('password') for a in self._accounts):
+            self._start_signin()
+
     def compose(self):
         self._accounts = be.load_config().get('accounts', [])
         with Vertical(classes='card'):
@@ -582,7 +591,7 @@ class MainScreen(Screen):
         lv.clear()
         idx = 0
         for i, (name, unread) in enumerate(self.folder_counts):
-            label = Text(f'{"▸" if name == self.folder else " "} {name}')
+            label = Text(f'{"▸" if name == self.folder else " "} {be.decode_folder(name)}')
             if unread:
                 label.append(f'  {unread}', style='bold cyan')
             item = ListItem(Label(label))
@@ -1094,7 +1103,7 @@ class MailCommands(Provider):
             commands.append(('Show all accounts', partial(screen.set_scope, None)))
             commands += [(f'Switch to account: {a.name}', partial(screen.set_scope, a.name))
                          for a in session.accounts]
-        commands += [(f'Open folder: {name}', partial(screen.goto_folder, name))
+        commands += [(f'Open folder: {be.decode_folder(name)}', partial(screen.goto_folder, name))
                      for name, _ in screen.folder_counts]
         for label, fn in commands:
             score = matcher.match(label)
@@ -1127,5 +1136,5 @@ class TuiMail(App):
         self.sub_title = ''
         while len(self.screen_stack) > 1:
             self.pop_screen()
-        self.push_screen(LoginScreen())
+        self.push_screen(LoginScreen(auto=False))  # signing out must stick
         self.notify('Signed out')

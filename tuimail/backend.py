@@ -9,6 +9,7 @@ Carries fixes for review-confirmed bugs of the old prototype:
   StopIteration;
 - In-Reply-To values are unfolded before being set as header values.
 """
+import base64
 import email
 import email.header
 import email.policy
@@ -175,6 +176,40 @@ def nice_date(dt: datetime | None) -> str:
     return local.strftime('%Y-%m-%d')
 
 
+def tls_context() -> ssl.SSLContext:
+    """Verifying TLS context that also works in frozen builds.
+
+    A PyInstaller binary (esp. on macOS) can have no OS CA paths at all —
+    verification would then fail on every connection; fall back to certifi's
+    bundle, which ships inside the app.
+    """
+    ctx = ssl.create_default_context()
+    if not ctx.cert_store_stats().get('x509_ca'):
+        try:
+            import certifi
+            ctx.load_verify_locations(certifi.where())
+        except Exception:
+            pass  # verification still on; connections fail closed without CAs
+    return ctx
+
+
+def decode_folder(name: str) -> str:
+    """IMAP modified-UTF7 (RFC 3501) folder name -> readable text, display only.
+
+    The raw name stays the key for every IMAP command; Gmail labels in
+    non-Latin scripts arrive as '&BB8EQAQ4BDIENQRC-' style."""
+    def _dec(m):
+        chunk = m.group(1)
+        if not chunk:
+            return '&'
+        try:
+            pad = '=' * (-len(chunk) % 4)
+            return base64.b64decode(chunk.replace(',', '/') + pad).decode('utf-16-be')
+        except Exception:
+            return m.group(0)
+    return re.sub(r'&([A-Za-z0-9+,]*)-', _dec, name)
+
+
 def nice_from(raw) -> str:
     """Display name from a raw From header: parse first, decode after."""
     name, addr = email.utils.parseaddr(str(raw or ''))
@@ -193,10 +228,14 @@ def body_of(msg) -> str:
         # (?:</tag>|\Z): an unclosed hostile tag matches to end-of-string instead
         # of forcing a quadratic rescan from every start position
         text = re.sub(r'(?is)<(script|style)\b.*?(?:</\1\s*>|\Z)', '', text)
-        text = re.sub(r'(?i)<br\s*/?>|</p>|</div>', '\n', text)
+        text = re.sub(r'(?i)<br\s*/?>|</p>|</div>|</tr>|</li>|</h[1-6]>|</table>|</blockquote>',
+                      '\n', text)
         import html as _html
-        text = _html.unescape(re.sub(r'<[^>]+>', '', text))  # ponytail: naive HTML strip; html.parser if it matters
-        text = re.sub(r'[ \t]+', ' ', text)
+        text = _html.unescape(re.sub(r'<[^>]+>', ' ', text))  # ponytail: naive HTML strip; html.parser if it matters
+        text = re.sub(r'[ \t\xa0]+', ' ', text)
+        # layout-table HTML leaves runs of whitespace-only lines; strip each
+        # line so the blank-line collapse below actually collapses them
+        text = '\n'.join(ln.strip() for ln in text.splitlines())
         text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return sanitize(text)
 
@@ -304,10 +343,8 @@ def parse_fetch_headers(resp) -> list[Summary]:
     return out
 
 
-def smtp_send(smtp_host, address, password, msg) -> None:
-    host, _, port = smtp_host.partition(':')
-    port = int(port or 465)
-    tls = ssl.create_default_context()  # stdlib default skips verification
+def _smtp_send_once(host, port, address, password, msg) -> None:
+    tls = tls_context()  # stdlib default skips verification
     # local_hostname: the default EHLO leaks the machine's hostname or LAN IP
     if port == 465:
         server = smtplib.SMTP_SSL(host, port, timeout=20, context=tls,
@@ -319,6 +356,19 @@ def smtp_send(smtp_host, address, password, msg) -> None:
             s.starttls(context=tls)
         s.login(address, password)
         s.send_message(msg)
+
+
+def smtp_send(smtp_host, address, password, msg) -> None:
+    host, _, port = smtp_host.partition(':')
+    port = int(port or 465)
+    try:
+        _smtp_send_once(host, port, address, password, msg)
+    except (ssl.SSLError, ConnectionError, TimeoutError):
+        if port != 465:
+            raise
+        # some networks break implicit-TLS :465 (resets mid-handshake) while
+        # the submission port still works — retry over 587 STARTTLS
+        _smtp_send_once(host, 587, address, password, msg)
 
 
 # --- IMAP backend ------------------------------------------------------------
@@ -338,7 +388,7 @@ class ImapBackend:
         # stdlib default context does NOT verify certificates — a MITM could
         # harvest the password; always verify cert + hostname
         self._conn = imaplib.IMAP4_SSL(host, int(port or 993), timeout=15,
-                                       ssl_context=ssl.create_default_context())
+                                       ssl_context=tls_context())
         self._conn.login(self.address, self._pw)
         self._selected = None
 
