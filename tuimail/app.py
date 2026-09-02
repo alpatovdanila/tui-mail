@@ -1998,6 +1998,10 @@ class TuiMail(App):
                         'pip install -U git+https://github.com/alpatovdanila/tui-mail.git)',
                         timeout=12)
             return
+        if kind == 'brew':
+            self.notify('Installed with Homebrew — update with: brew upgrade --cask tuimail',
+                        timeout=12)
+            return
         if kind == 'unsupported':
             self.notify('Self-update only works for the released binaries',
                         severity='warning')

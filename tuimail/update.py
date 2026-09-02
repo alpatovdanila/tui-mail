@@ -57,6 +57,8 @@ def check_latest(timeout=10):
 def install_kind() -> str:
     if not getattr(sys, 'frozen', False):
         return 'pip'
+    if '/Caskroom/' in os.path.realpath(sys.executable).replace('\\', '/'):
+        return 'brew'  # Homebrew owns this binary — let brew upgrade it
     if sys.platform == 'darwin':
         return 'macos'
     if os.name == 'nt':

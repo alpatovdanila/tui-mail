@@ -4,6 +4,17 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.12.0 — 2026-09-02
+
+### Added
+- **Homebrew cask**: `brew tap alpatovdanila/tui-mail
+  https://github.com/alpatovdanila/tui-mail && brew install --cask tuimail`.
+  The repository doubles as the tap; every versioned release publishes a
+  `tuimail-macos-universal.tar.gz` and CI commits the new version and sha256
+  into the cask, so `brew upgrade --cask tuimail` just works. The in-app
+  updater recognises a brew install and points at brew instead of replacing
+  the binary itself.
+
 ## 1.11.0 — 2026-09-02
 
 The second batch from the usability study (P1) — the daily-driver verbs:

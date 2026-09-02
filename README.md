@@ -45,6 +45,15 @@ aren't quarantined). Verifies the release's sha256, installs to
 curl -fsSL https://raw.githubusercontent.com/alpatovdanila/tui-mail/main/install.sh | sh
 ```
 
+**macOS with Homebrew** — this repository doubles as the tap; the cask is
+updated by CI on every release, so `brew upgrade` keeps you current (the
+in-app updater defers to brew for this install):
+
+```bash
+brew tap alpatovdanila/tui-mail https://github.com/alpatovdanila/tui-mail
+brew install --cask tuimail
+```
+
 **Windows** — same idea, into `%LOCALAPPDATA%\Programs\tuimail`:
 
 ```powershell

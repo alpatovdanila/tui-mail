@@ -92,6 +92,10 @@ jobs:
           mkdir out
           mv art/tuimail-windows/tuimail.exe out/tuimail-windows.exe
           mv art/tuimail-macos-universal/tuimail out/tuimail-macos-universal
+          chmod +x out/tuimail-macos-universal
+          # Homebrew cask consumes a tarball whose entry is the final binary name
+          tar -czf out/tuimail-macos-universal.tar.gz -C out \
+            --transform 's/^tuimail-macos-universal$/tuimail/' tuimail-macos-universal
       - name: publish releases
         run: |
           notes_for() { awk -v v="$1" 'index($0, "## " v) == 1 {f=1; next} /^## /{f=0} f' CHANGELOG.md; }
@@ -116,4 +120,14 @@ jobs:
             NOTES="$(notes_for "$VERSION")"
             gh release create "v$VERSION" out/* --target "$GITHUB_SHA" \
               --title "tuimail v$VERSION" --notes "${NOTES:-Release v$VERSION}"
+
+            # point the Homebrew cask (this repo doubles as the tap) at the new
+            # tarball; [skip ci] keeps the bookkeeping commit from re-running CI
+            SHA=$(sha256sum out/tuimail-macos-universal.tar.gz | cut -d' ' -f1)
+            sed -i -e "s/^  version \".*\"/  version \"$VERSION\"/" \
+                   -e "s/^  sha256 \".*\"/  sha256 \"$SHA\"/" Casks/tuimail.rb
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Casks/tuimail.rb
+            git commit -m "brew: cask $VERSION [skip ci]" && git push origin HEAD:main
           fi

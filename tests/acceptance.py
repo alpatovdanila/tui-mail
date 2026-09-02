@@ -228,6 +228,16 @@ def helpers():
     assert up.is_newer('v99.0.0') and not up.is_newer('v0.0.1') and not up.is_newer('')
     assert up.asset_name() in ('tuimail-windows.exe', 'tuimail-macos-universal')
     assert up.cli_installed() is False  # never true off-macOS / unfrozen, never raises
+    # a Homebrew-owned binary is never self-replaced
+    import sys as _sysb
+    orig_exeb = _sysb.executable
+    _sysb.frozen = True
+    _sysb.executable = '/opt/homebrew/Caskroom/tuimail/1.12.0/tuimail'
+    try:
+        assert up.install_kind() == 'brew'
+    finally:
+        del _sysb.frozen
+        _sysb.executable = orig_exeb
 
     # HTML mail converts to markdown for the reader (headings, bold, links kept)
     rich_html = email.message_from_bytes(
