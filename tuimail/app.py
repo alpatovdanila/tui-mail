@@ -504,6 +504,7 @@ class MainScreen(Screen):
         self.update_accounts()
         self.set_interval(60, partial(self._load_all, False))  # quiet background poll
         self._load_all(True)
+        self.app.maybe_offer_cli()
 
     # -- data loading --
     @work(thread=True, exclusive=True, group='load')
@@ -1124,6 +1125,9 @@ class MailCommands(Provider):
                          for a in session.accounts]
         commands += [(f'Open folder: {be.decode_folder(name)}', partial(screen.goto_folder, name))
                      for name, _ in screen.folder_counts]
+        if up.install_kind() == 'macos' and not up.cli_installed():
+            commands.append(('Install the tuimail terminal command',
+                             self.app._install_cli))
         for label, fn in commands:
             score = matcher.match(label)
             if score > 0:
@@ -1214,6 +1218,32 @@ class TuiMail(App):
         if mode == 'restart':
             self.restart_after_exit = True  # __main__ re-execs the new binary
         self.exit()
+
+    # -- terminal command (macOS) --
+    def maybe_offer_cli(self):
+        """First-launch offer to link `tuimail` into PATH — the way VS Code
+        and iTerm install their CLIs; asked once, redoable via the palette."""
+        if up.install_kind() != 'macos' or up.cli_installed():
+            return
+        cfg = be.load_config()
+        if cfg.get('cli_offered'):
+            return
+        cfg['cli_offered'] = True
+        be.save_config(cfg)
+        self.push_screen(
+            ConfirmScreen('Install the tuimail terminal command? '
+                          '(your admin password may be asked)'),
+            lambda ok: self._install_cli() if ok else None)
+
+    @work(thread=True, exclusive=True, group='cli')
+    def _install_cli(self):
+        try:
+            up.install_cli()
+        except Exception as exc:
+            self.call_from_thread(self.notify, f'Could not install the command: {exc}',
+                                  severity='error', timeout=8)
+            return
+        self.call_from_thread(self.notify, 'Installed — run tuimail from any terminal')
 
     def action_logout(self):
         if self.session is None:

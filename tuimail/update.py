@@ -95,6 +95,37 @@ def download(url, sha256, dest_dir, timeout=120) -> Path:
     return Path(tmp)
 
 
+CLI_LINK = '/usr/local/bin/tuimail'
+
+
+def cli_installed() -> bool:
+    try:
+        return os.path.realpath(CLI_LINK) == str(target_path())
+    except OSError:
+        return False
+
+
+def install_cli() -> None:
+    """Link /usr/local/bin/tuimail -> this binary. Tries a plain symlink and
+    falls back to the native admin-password dialog — the VS Code/iTerm way,
+    no Terminal sudo and no separate installer script."""
+    target = str(target_path())
+    try:
+        os.makedirs('/usr/local/bin', exist_ok=True)
+        if os.path.islink(CLI_LINK) or os.path.exists(CLI_LINK):
+            os.unlink(CLI_LINK)
+        os.symlink(target, CLI_LINK)
+        return
+    except OSError:
+        pass  # root-owned dir — ask properly
+    script = (f'do shell script "mkdir -p /usr/local/bin && '
+              f'ln -sf \\"{target}\\" \\"{CLI_LINK}\\"" with administrator privileges')
+    r = subprocess.run(['osascript', '-e', script],
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or 'authorization declined')
+
+
 def apply_update(staged: Path) -> str:
     """Swap the binary; returns 'restart' (re-exec on exit) or 'exit' (helper
     relaunches after the process ends)."""

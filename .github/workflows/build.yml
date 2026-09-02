@@ -77,22 +77,6 @@ jobs:
           [ -d "/Applications/iTerm.app" ] && TERM_APP="iTerm"
           open -a "$TERM_APP" "$APP_DIR/Contents/MacOS/tuimail-bin"
           EOF
-          cat > "dmgroot/Install command line tool.command" <<'EOF'
-          #!/bin/bash
-          set -e
-          BIN="/Applications/tuimail.app/Contents/MacOS/tuimail-bin"
-          if [ ! -x "$BIN" ]; then
-            echo "Drag tuimail.app into Applications first, then run this again."
-            read -r -p "Press Enter to close."
-            exit 1
-          fi
-          echo "Linking tuimail into /usr/local/bin (your password may be asked)…"
-          sudo mkdir -p /usr/local/bin
-          sudo ln -sf "$BIN" /usr/local/bin/tuimail
-          sudo xattr -dr com.apple.quarantine /Applications/tuimail.app 2>/dev/null || true
-          echo "Done. Open a new terminal and run: tuimail"
-          EOF
-          chmod +x "dmgroot/Install command line tool.command"
           chmod +x "$APP/Contents/MacOS/launcher" "$APP/Contents/MacOS/tuimail-bin"
           cat > "$APP/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>

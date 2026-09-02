@@ -160,6 +160,7 @@ def helpers():
     assert up.parse_version('v1.2.3') == (1, 2, 3)
     assert up.is_newer('v99.0.0') and not up.is_newer('v0.0.1') and not up.is_newer('')
     assert up.asset_name() in ('tuimail-windows.exe', 'tuimail-macos-universal')
+    assert up.cli_installed() is False  # never true off-macOS / unfrozen, never raises
 
     # HTML mail converts to markdown for the reader (headings, bold, links kept)
     rich_html = email.message_from_bytes(

@@ -70,10 +70,12 @@ pyinstaller --onefile --console --name tuimail --collect-all textual --add-data 
 open it and **drag tuimail into Applications** — the usual two-icon window.
 The app is not code-signed, so the first launch needs a right-click > Open
 (or System Settings → Privacy & Security → Open Anyway); after that it opens
-normally. Double-clicking the app opens Terminal running tuimail.
+normally. Double-clicking the app opens iTerm (or Terminal) running tuimail.
 
-Want the `tuimail` command in your own terminal too? Either link the app's
-binary:
+On first run the app offers to install the `tuimail` terminal command via the
+native admin dialog — the same pattern VS Code and iTerm2 use; it's also
+available any time from the Ctrl+P palette. Prefer doing it by hand? Link the
+app's binary:
 
 ```bash
 sudo ln -sf /Applications/tuimail.app/Contents/MacOS/tuimail-bin /usr/local/bin/tuimail

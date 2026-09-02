@@ -4,6 +4,15 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.6.1 — 2026-09-02
+
+### Changed
+- The dmg no longer ships a separate "Install command line tool" script (an
+  extra Gatekeeper-blocked click). Instead, on first run the app itself
+  offers to install the `tuimail` terminal command through the native macOS
+  admin dialog — the VS Code/iTerm2 pattern; also available any time from
+  the Ctrl+P palette.
+
 ## 1.6.0 — 2026-09-02
 
 ### Added
