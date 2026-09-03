@@ -1,6 +1,6 @@
 cask "tuimail" do
-  version "1.13.0"
-  sha256 "2ccae4a289e186b1fb5a247dfe9c843cb9091fc90290414d98fcf84f2a1748a3"
+  version "1.13.1"
+  sha256 "e2889c620754d01db418650bf48f947b7e7338f2f9349e3bc92bbc7be7de937c"
 
   url "https://github.com/alpatovdanila/tui-mail/releases/download/v#{version}/tuimail-macos-universal.tar.gz"
   name "tuimail"
