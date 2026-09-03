@@ -78,15 +78,25 @@ def _installed_location(exe_dir: Path, platform=None) -> bool:
     non-portable app. Portable mode is only for genuinely ad-hoc places:
     a USB stick, Downloads, an unpacked folder."""
     platform = platform or os.name
-    p = exe_dir.as_posix().rstrip('/').lower()
-    real = Path(os.path.realpath(exe_dir)).as_posix().lower()
+    # normalise separators so a Windows path is still recognisable when this
+    # runs on a POSIX host (the test suite, and cross-platform tooling)
+    p = exe_dir.as_posix().replace('\\', '/').rstrip('/').lower()
+    real = Path(os.path.realpath(exe_dir)).as_posix().replace('\\', '/').lower()
     if '.app/contents/' in p or '/caskroom/' in real or '/cellar/' in real:
         return True
     if platform == 'nt':
+        # match by path SHAPE, not just env vars: LOCALAPPDATA and ProgramFiles
+        # can be unset (services, odd shells), and the installer's own target
+        # is always one of these standard destinations
+        substrings = ['/appdata/local/programs/',       # our install.ps1 target
+                      '/appdata/local/microsoft/windowsapps',
+                      '/program files/', '/program files (x86)/']
+        if any(sub in p + '/' for sub in substrings):
+            return True
         roots = [os.environ.get('ProgramFiles'), os.environ.get('ProgramFiles(x86)'),
                  os.environ.get('ProgramW6432')]
         if local := os.environ.get('LOCALAPPDATA'):
-            roots += [str(Path(local) / 'Programs'), str(Path(local) / 'Microsoft' / 'WindowsApps')]
+            roots += [str(Path(local) / 'Programs')]
         roots = [Path(r).as_posix().rstrip('/').lower() for r in roots if r]
     else:
         roots = ['/usr', '/opt', '/bin', '/sbin',

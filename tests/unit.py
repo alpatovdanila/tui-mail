@@ -30,14 +30,14 @@ from tuimail import update as up  # noqa: E402
 
 def test_installed_location():
     f = be._installed_location
-    # Windows: the installer target and Program Files are installs
-    local = os.environ.get('LOCALAPPDATA', r'C:\Users\u\AppData\Local')
-    assert f(Path(local) / 'Programs' / 'tuimail', platform='nt')
-    assert f(Path(local) / 'Programs', platform='nt')
-    pf = os.environ.get('ProgramFiles', r'C:\Program Files')
-    assert f(Path(pf) / 'tuimail', platform='nt')
+    # Windows: matched by path shape, so this holds on any OS / with env unset
+    assert f(Path(r'C:\Users\u\AppData\Local\Programs\tuimail'), platform='nt')
+    assert f(Path(r'C:\Program Files\tuimail'), platform='nt')
+    assert f(Path(r'C:\Program Files (x86)\tuimail'), platform='nt')
+    assert f(Path(r'C:\Users\u\AppData\Local\Microsoft\WindowsApps'), platform='nt')
     assert not f(Path(r'D:\USB\tuimail'), platform='nt')
-    assert not f(Path(local) / 'Temp' / 'tuimail', platform='nt')  # not Programs
+    assert not f(Path(r'C:\Users\u\AppData\Local\Temp\tuimail'), platform='nt')  # not Programs
+    assert not f(Path(r'C:\Users\u\Downloads'), platform='nt')
     # POSIX: system prefixes and ~/.local/bin are installs
     assert f(Path('/usr/local/bin'), platform='posix')
     assert f(Path('/opt/tuimail'), platform='posix')
@@ -53,8 +53,12 @@ def test_config_path_installed_vs_portable():
     $HOME; only an ad-hoc location is portable."""
     saved = os.environ.pop('TUIMAIL_CONFIG')
     orig_exe = sys.executable
-    local = os.environ.get('LOCALAPPDATA', r'C:\Users\u\AppData\Local')
-    installed = Path(local) / 'Programs' / 'tuimail' / 'tuimail.exe'
+    # an install destination pathlib parses correctly on THIS os (config_path
+    # calls Path(sys.executable).parent, which needs native separators)
+    if os.name == 'nt':
+        installed = Path(r'C:\Users\u\AppData\Local\Programs\tuimail\tuimail.exe')
+    else:
+        installed = Path('/usr/local/bin/tuimail')
     portable_dir = Path(tempfile.mkdtemp(prefix='tuimail-usb-'))
     try:
         sys.frozen = True
