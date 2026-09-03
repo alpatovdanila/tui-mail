@@ -4,3 +4,7 @@ dist/
 *.spec
 .claude/
 *.egg-info/
+
+# e2e test cert (regenerated on demand by tests/gencert.py)
+tests/testcert.pem
+tests/testkey.pem

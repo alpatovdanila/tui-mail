@@ -41,11 +41,13 @@ OUTBOX = 'tuimail:Outbox'
 class PartialDelivery(smtplib.SMTPRecipientsRefused):
     """Some recipients were refused after the others had accepted the mail."""
 
-    def __str__(self):
+    def __init__(self, recipients):
+        super().__init__(recipients)
         bad = ', '.join(f'{addr} ({code} {err_text(Exception(msg))})'
-                        for addr, (code, msg) in self.recipients.items())
-        return (f'not delivered to {bad}; the other recipients did get it - '
-                'resend to the failed address only')
+                        for addr, (code, msg) in recipients.items())
+        # args carries the human text: err_text() and toasts read args
+        self.args = (f'not delivered to {bad}; the other recipients did get it - '
+                     'resend to the failed address only',)
 
 
 # --- config ------------------------------------------------------------------
@@ -70,16 +72,36 @@ PROVIDERS = {
 }
 
 
+def _installed_location(exe_dir: Path, platform=None) -> bool:
+    """True when the exe sits in a standard install destination — there the
+    config (and saved passwords) belong in the home dir, exactly like a
+    non-portable app. Portable mode is only for genuinely ad-hoc places:
+    a USB stick, Downloads, an unpacked folder."""
+    platform = platform or os.name
+    p = exe_dir.as_posix().rstrip('/').lower()
+    real = Path(os.path.realpath(exe_dir)).as_posix().lower()
+    if '.app/contents/' in p or '/caskroom/' in real or '/cellar/' in real:
+        return True
+    if platform == 'nt':
+        roots = [os.environ.get('ProgramFiles'), os.environ.get('ProgramFiles(x86)'),
+                 os.environ.get('ProgramW6432')]
+        if local := os.environ.get('LOCALAPPDATA'):
+            roots += [str(Path(local) / 'Programs'), str(Path(local) / 'Microsoft' / 'WindowsApps')]
+        roots = [Path(r).as_posix().rstrip('/').lower() for r in roots if r]
+    else:
+        roots = ['/usr', '/opt', '/bin', '/sbin',
+                 (Path.home() / '.local' / 'bin').as_posix().lower()]
+    return any(p == r or p.startswith(r + '/') for r in roots)
+
+
 def config_path() -> Path:
     if p := os.environ.get('TUIMAIL_CONFIG'):
         return Path(p)
     if getattr(sys, 'frozen', False):
         exe_dir = Path(sys.executable).parent
-        # a macOS .app install is not portable media: its Contents/MacOS dir is
-        # user-writable, but settings belong in $HOME (and survive app updates)
-        if '.app/Contents/' not in exe_dir.as_posix():
+        if not _installed_location(exe_dir):
             here = exe_dir / 'tuimail.json'  # portable binary: settings travel next to it
-            # non-writable dir (e.g. /usr/local/bin) -> fall through to home
+            # non-writable dir -> fall through to home
             if here.exists() or os.access(exe_dir, os.W_OK):
                 return here
     return Path.home() / '.tuimail.json'
@@ -97,7 +119,9 @@ def next_color(cfg) -> str:
 def load_config() -> dict:
     p = config_path()
     if not p.exists() and getattr(sys, 'frozen', False):
-        # pre-1.5.1 mac builds kept the config inside the .app bundle — migrate
+        # older builds kept the config next to the exe even for installed
+        # copies (the .app bundle, LOCALAPPDATA\Programs, ~/.local/bin) — the
+        # accounts migrate to $HOME; the password was never stored there
         legacy = Path(sys.executable).parent / 'tuimail.json'
         if legacy != p and legacy.exists():
             try:
@@ -488,16 +512,19 @@ def parse_fetch_headers(resp) -> list[Summary]:
     return out
 
 
+SMTP_TLS_PORTS = {465}  # implicit TLS from the first byte; other ports STARTTLS
+
+
 def _smtp_send_once(host, port, address, password, msg) -> None:
     tls = tls_context()  # stdlib default skips verification
     # local_hostname: the default EHLO leaks the machine's hostname or LAN IP
-    if port == 465:
+    if port in SMTP_TLS_PORTS:
         server = smtplib.SMTP_SSL(host, port, timeout=20, context=tls,
                                   local_hostname='localhost')
     else:
         server = smtplib.SMTP(host, port, timeout=20, local_hostname='localhost')
     with server as s:
-        if port != 465:
+        if port not in SMTP_TLS_PORTS:
             s.starttls(context=tls)
         s.login(address, password)
         refused = s.send_message(msg)  # smtplib raises only when EVERY recipient is refused
@@ -505,17 +532,33 @@ def _smtp_send_once(host, port, address, password, msg) -> None:
             raise PartialDelivery(refused)
 
 
+# transport-level failures worth a second try on the submission port; a
+# middlebox that filters the port shows up as any of these depending on how
+# it kills the connection (reset, silent close, garbage into the handshake)
+_SMTP_TRANSPORT_ERRORS = (ssl.SSLError, ConnectionError, TimeoutError,
+                          smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError)
+SMTP_FALLBACK_PORT = 587
+
+
 def smtp_send(smtp_host, address, password, msg) -> None:
     host, _, port = smtp_host.partition(':')
     port = int(port or 465)
     try:
         _smtp_send_once(host, port, address, password, msg)
-    except (ssl.SSLError, ConnectionError, TimeoutError):
-        if port != 465:
+        return
+    except _SMTP_TRANSPORT_ERRORS as exc:
+        if port not in SMTP_TLS_PORTS:
             raise
-        # some networks break implicit-TLS :465 (resets mid-handshake) while
-        # the submission port still works — retry over 587 STARTTLS
-        _smtp_send_once(host, 587, address, password, msg)
+        first = exc  # some networks break implicit-TLS :465 while 587 works
+    try:
+        _smtp_send_once(host, SMTP_FALLBACK_PORT, address, password, msg)
+    except _SMTP_TRANSPORT_ERRORS as exc:
+        # both ports dead: report BOTH errors — showing only the fallback's
+        # turns a blocked network into a misleading mystery
+        raise RuntimeError(
+            f'port {port}: {err_text(first)} — retried on port {SMTP_FALLBACK_PORT}: '
+            f'{err_text(exc)}. The network may be blocking outgoing mail '
+            '(try another network or a VPN)') from exc
 
 
 # --- IMAP backend ------------------------------------------------------------

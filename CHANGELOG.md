@@ -4,6 +4,38 @@ All notable changes to tuimail. The version in `pyproject.toml` is the source
 of truth: bump it, add a section here, push — CI cuts the `vX.Y.Z` release
 with these notes automatically.
 
+## 1.13.1 — 2026-09-03
+
+Field feedback on the 1.13.0 build, plus a real end-to-end test suite.
+
+### Fixed
+- **Saved passwords work on an installed copy again.** Portable mode (which
+  refuses to store passwords next to the exe) was triggering for the normal
+  install location too — `%LOCALAPPDATA%\Programs\tuimail` on Windows,
+  `~/.local/bin` and the `.app`/Homebrew paths on macOS — so "remember
+  password" was silently refused with a portable-mode warning. Those standard
+  destinations are now treated as installs: the config (with the password)
+  goes to `~/.tuimail.json`. Portable mode is reserved for genuinely ad-hoc
+  places (a USB stick, Downloads, an unpacked folder).
+- **Outgoing mail: the SMTP send is more robust and its errors are honest.**
+  A submission port that completes TLS and then drops the connection
+  (`SMTPServerDisconnected`, common with a filtering middlebox) now falls back
+  to port 587 like a reset already did. When both ports fail, the message
+  keeps a single error naming *both* attempts and suggesting the network may
+  be blocking outgoing mail — instead of a bare, misleading disconnect from
+  whichever port happened to be tried last.
+
+### Testing
+- New **unit** suite (`tests/unit.py`) covering the backend/outbox/update
+  helpers function by function, including regressions for both bugs above.
+- New **end-to-end** suite (`tests/e2e.py`) that runs real SMTP and IMAP
+  servers on localhost over genuine TLS (`tests/mailserver.py`) and drives the
+  actual app — sign-in, read, mark/star on the server, server-side search,
+  attachments, compose → Outbox → SMTP delivery into another account's real
+  mailbox, refused/greylisted/partial recipients, delete-to-Trash and archive
+  as IMAP MOVEs, and reconnect after a dropped connection. `tests/run_all.py`
+  runs unit + e2e + acceptance, and CI runs all three.
+
 ## 1.13.0 — 2026-09-02
 
 ### Added

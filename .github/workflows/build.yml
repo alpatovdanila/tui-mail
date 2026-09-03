@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: pip install "textual==8.2.8" "markdownify==1.2.3"
-      - run: python tests/acceptance.py
+      - run: python tests/run_all.py  # unit + e2e (real TLS mail server) + acceptance
 
   build:
     needs: test
